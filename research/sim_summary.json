@@ -1,0 +1,75 @@
+{
+ "pol": {
+  "post1_compact": [
+   1.69,
+   1.47,
+   1.9
+  ],
+  "post2_remnant": [
+   1.85,
+   1.59,
+   2.03
+  ],
+  "precut_remnant": [
+   1.88,
+   1.61,
+   2.05
+  ],
+  "shadow": [
+   1.92,
+   1.63,
+   2.1
+  ]
+ },
+ "labels": {
+  "post1_compact": "After the cut, ordinary layout",
+  "post2_remnant": "After the cut, careful layout",
+  "precut_remnant": "Gap Fill, before the cut",
+  "shadow": "Gap Fill + layout shaping"
+ },
+ "reg": {
+  "large-balanced": {
+   "post1_compact": 1.77,
+   "post2_remnant": 1.93,
+   "precut_remnant": 1.95,
+   "shadow": 2.01
+  },
+  "large-scarce": {
+   "post1_compact": 1.62,
+   "post2_remnant": 1.73,
+   "precut_remnant": 1.75,
+   "shadow": 1.78
+  },
+  "mixed-balanced": {
+   "post1_compact": 1.74,
+   "post2_remnant": 1.92,
+   "precut_remnant": 1.94,
+   "shadow": 1.98
+  },
+  "mixed-plentiful": {
+   "post1_compact": 1.8,
+   "post2_remnant": 1.99,
+   "precut_remnant": 2.01,
+   "shadow": 2.05
+  },
+  "mixed-scarce": {
+   "post1_compact": 1.5,
+   "post2_remnant": 1.57,
+   "precut_remnant": 1.58,
+   "shadow": 1.6
+  }
+ },
+ "thick": {
+  "3": 707,
+  "5": 1468,
+  "6": 1858,
+  "8": 2581,
+  "10": 3546
+ },
+ "perkg": [
+  28.07,
+  19.47,
+  33.57
+ ],
+ "n": 5000
+}

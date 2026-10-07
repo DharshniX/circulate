@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CIRCULATE</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..100,400..800&display=swap" rel="stylesheet">
+<style>
+:root{
+  --floor:#EDEFEE; --ink:#1D2329; --muted:#5B636B; --rule:#C9CDD0;
+  --steel:#9AA1A8; --steel-edge:#646C74; --steel-dim:#C8CCCF;
+  --paint:#F2B705; --paint-edge:#9C7600; --rust:#9A4A2B; --gain:#1F6F54; --warn:#8A5A00;
+  --panel:#F8F9F8; --fresh:#3E7D5A; --chill:#3B6E8F;
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--floor);color:var(--ink);font-family:Archivo,system-ui,sans-serif;line-height:1.45;font-variant-numeric:tabular-nums}
+button,input,select{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--paint-edge);outline-offset:2px}
+.wrap{max-width:1280px;margin:0 auto;padding:24px 24px 64px}
+header.top{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap;padding-bottom:12px;border-bottom:2px solid var(--ink)}
+.brand{font-weight:800;font-stretch:75%;font-size:1.6rem;letter-spacing:.02em}
+.top p{margin:0;color:var(--muted);font-size:.95rem}
+.datanote{font-size:.85rem;color:var(--warn)}
+nav.tabs{display:flex;gap:4px;flex-wrap:wrap;margin-top:16px}
+nav.tabs button{border:1px solid var(--rule);background:var(--panel);padding:8px 14px;border-radius:3px 3px 0 0;cursor:pointer;font-weight:600}
+nav.tabs button[aria-selected=true]{background:var(--ink);color:#fff;border-color:var(--ink)}
+nav.tabs button.road{color:var(--muted);font-weight:500;border-style:dashed}
+.engine-line{font-size:.88rem;color:var(--muted);margin:8px 0 0}
+.hero{padding:22px 0 18px;max-width:1000px}
+.hero h1{font-weight:700;font-stretch:80%;font-size:clamp(1.7rem,3.4vw,2.9rem);line-height:1.08;margin:0}
+.hero h1 .num{font-weight:800}
+.hero h1 .dim{color:var(--muted)}
+.hero p{margin:12px 0 0;color:var(--muted);max-width:75ch}
+.grid{display:grid;grid-template-columns:300px 1fr;gap:28px;align-items:start}
+.grid>*,.value>*{min-width:0}
+@media (max-width:900px){.grid{grid-template-columns:1fr}aside{position:static!important}.wrap{padding:16px 16px 48px}}
+aside{position:sticky;top:16px;background:var(--panel);border:1px solid var(--rule);border-radius:4px;padding:18px}
+aside h2{font-size:1rem;margin:0 0 10px}
+aside section+section{margin-top:18px;padding-top:16px;border-top:1px solid var(--rule)}
+label{display:block;font-size:.88rem;color:var(--muted);margin:8px 0 3px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+input[type=number],select,input[type=text]{width:100%;padding:7px 8px;border:1px solid var(--steel-edge);border-radius:3px;background:#fff}
+input[type=range]{width:100%;accent-color:var(--ink)}
+.check{display:flex;align-items:center;gap:8px;margin:6px 0;font-size:.95rem;color:var(--ink)}
+.check input{width:18px;height:18px;accent-color:var(--ink)}
+.btn{display:inline-block;border:2px solid var(--ink);background:var(--ink);color:#fff;padding:8px 14px;border-radius:3px;cursor:pointer;font-weight:600}
+.btn.ghost{background:transparent;color:var(--ink)}
+.btn[disabled]{opacity:.4;cursor:not-allowed}
+h2.sec{font-size:1.15rem;margin:0 0 4px}
+.sub{color:var(--muted);font-size:.92rem;margin:0 0 12px}
+.yards{display:grid;grid-template-columns:repeat(auto-fill,minmax(420px,1fr));gap:18px}
+@media (max-width:520px){.yards{grid-template-columns:1fr}}
+.yard{background:var(--panel);border:1px solid var(--rule);border-radius:4px;padding:12px 12px 10px}
+.yard.off{opacity:.38}
+.yard header{display:flex;justify-content:space-between;gap:8px;align-items:baseline;flex-wrap:wrap}
+.yard h3{margin:0;font-size:1rem}
+.meta{font-size:.85rem;color:var(--muted)}
+.yard svg{display:block;width:100%;height:auto;margin-top:8px}
+.legend{display:flex;gap:18px;flex-wrap:wrap;font-size:.85rem;color:var(--muted);margin:10px 0 0}
+.sw{display:inline-block;width:14px;height:10px;vertical-align:-1px;margin-right:6px;border:1px solid var(--steel-edge)}
+.lots{list-style:none;margin:8px 0 0;padding:0}
+.lots li{padding:6px 0;border-top:1px solid var(--rule);font-size:.9rem}
+.lots .bar{height:8px;background:#fff;border:1px solid var(--rule);margin-top:4px;position:relative}
+.lots .bar i{position:absolute;inset:0 auto 0 0;background:var(--fresh)}
+.lots .bar b{position:absolute;inset:0 auto 0 0;background:var(--paint);border-right:1px solid var(--paint-edge)}
+.lots .why{color:var(--rust);font-size:.82rem}
+.lots .tagline{display:flex;justify-content:space-between;gap:8px}
+.value{margin-top:22px;display:grid;grid-template-columns:1.3fr 1fr;gap:28px}
+@media (max-width:900px){.value{grid-template-columns:1fr}}
+.vbar{margin:8px 0}
+.vbar span{display:block;font-size:.9rem;color:var(--muted)}
+.track{height:22px;background:#fff;border:1px solid var(--rule);border-radius:2px}
+.fill{height:100%}
+table{border-collapse:collapse;width:100%;font-size:.92rem}
+td,th{padding:6px 8px;border-bottom:1px solid var(--rule);text-align:left;vertical-align:top}
+th{font-weight:600;color:var(--muted)}
+.r{text-align:right}
+.tablewrap{overflow-x:auto}
+.tag{display:inline-block;font-size:.78rem;padding:1px 6px;border-radius:2px;border:1px solid currentColor;white-space:nowrap}
+.tag.sample{color:var(--warn)} .tag.sim{color:var(--rust)} .tag.ver{color:var(--gain)} .tag.mod{color:var(--muted)}
+.msg{padding:10px 12px;border-left:4px solid var(--ink);background:var(--panel);margin:12px 0}
+.msg.bad{border-color:var(--rust)} .msg.good{border-color:var(--gain)}
+.block{margin-top:36px;padding-top:20px;border-top:2px solid var(--ink)}
+.plan-steps{display:flex;margin:14px 0;overflow-x:auto}
+.step{flex:1 0 170px;padding:10px 12px;border:1px solid var(--rule);background:var(--panel)}
+.step+.step{border-left:none}
+.step.end{background:#fff;color:var(--muted)}
+.step.rejected{text-decoration:line-through;opacity:.5}
+.step h4{margin:0 0 4px;font-size:.95rem}
+.step small{display:block;color:var(--muted)}
+.warn{color:var(--warn);font-size:.88rem;margin:4px 0}
+.dealbar{display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin:12px 0}
+.dealbar>div{min-width:min(220px,100%)}
+.minimap{background:#fff;border:1px solid var(--rule);border-radius:4px;width:100%;height:auto}
+.err{color:var(--rust);font-weight:600}
+.roadmap{background:var(--panel);border:1px dashed var(--steel-edge);border-radius:4px;padding:20px;max-width:760px}
+.platform{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px;margin-top:12px}
+.platform div{border:1px solid var(--rule);background:var(--panel);padding:10px 12px;border-radius:4px;font-size:.9rem}
+.platform div.not{border-style:dashed;color:var(--muted)}
+.platform b{display:block}
+@media (prefers-reduced-motion:no-preference){.part.new{animation:cut .45s ease-out both}@keyframes cut{from{opacity:0}to{opacity:1}}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div class="brand">CIRCULATE</div>
+    <p>Valuing surplus by what it can still become</p>
+    <p class="datanote">Every seller, buyer, size and price on this page is sample data.</p>
+  </header>
+  <nav class="tabs" id="tabs" role="tablist"></nav>
+  <p class="engine-line" id="engineLine"></p>
+
+  <div id="live">
+    <div class="hero" aria-live="polite"><h1 id="headline">Loading…</h1><p id="heroSub"></p></div>
+    <div class="grid">
+      <aside aria-label="Order and conditions">
+        <section>
+          <h2>Buyer's order</h2>
+          <label for="demand">Order</label>
+          <select id="demand"></select>
+          <div id="orderFields"></div>
+        </section>
+        <section><h2>Sellers nearby</h2><div id="sellerToggles"></div></section>
+        <section>
+          <h2>Transport</h2>
+          <label for="rate">Hire and fuel rates: <span id="ratev"></span>× sample rates</label>
+          <input id="rate" type="range" min="0.25" max="10" step="0.25">
+          <div id="kerfBox"><label for="kerf">Cutting kerf: <span id="kerfv"></span> mm</label><input id="kerf" type="range" min="0" max="10" step="0.5"></div>
+        </section>
+      </aside>
+      <main>
+        <section>
+          <h2 class="sec" id="floorTitle">The surplus</h2>
+          <p class="sub" id="floorSub"></p>
+          <div class="yards" id="yards"></div>
+          <div class="legend" id="legend"></div>
+        </section>
+        <section class="value">
+          <div><h2 class="sec">Salvage value against productive value</h2><div id="bars"></div><div id="fulfilMsg"></div></div>
+          <div><h2 class="sec">Pickup route</h2><svg class="minimap" id="minimap" viewBox="0 0 320 240" role="img" aria-label="Pickup route map"></svg><p class="sub" id="routeTxt"></p></div>
+        </section>
+        <section style="margin-top:22px">
+          <h2 class="sec">Who supplies what</h2>
+          <div class="tablewrap"><table id="perSeller"></table></div>
+          <p class="sub" id="alts"></p>
+        </section>
+        <section class="block">
+          <h2 class="sec" id="planTitle">Recovery plan</h2>
+          <p class="sub">The engine scores every order of trying buyers within the deadline, with salvage as the last step, and picks the highest expected value.</p>
+          <div class="row" style="max-width:520px">
+            <div><label for="deadline" id="deadlineLbl">Clear within</label><input id="deadline" type="number" min="1" max="720"></div>
+            <div id="stockistBox"><label for="stockist">Stockist buy-back (₹/kg)</label><input id="stockist" type="number" min="0" step="1" value="40"></div>
+          </div>
+          <div class="plan-steps" id="planSteps"></div>
+          <p id="planWhy"></p><div id="planWarn"></div>
+          <button class="btn ghost" id="reject">First buyer says no</button>
+          <button class="btn ghost" id="resetPlan">Reset plan</button>
+          <details style="margin-top:12px"><summary>All routes considered</summary><div class="tablewrap"><table id="routesTbl"></table></div></details>
+        </section>
+        <section class="block">
+          <h2 class="sec">Close the order</h2>
+          <p class="sub">The buyer here is simulated. A simulated deal is never counted as verified, even with evidence.</p>
+          <div class="dealbar">
+            <button class="btn" id="accept">Buyer accepts</button>
+            <button class="btn ghost" id="dispatch" disabled>Mark dispatched</button>
+            <div><label for="evidence">Delivery evidence</label><input id="evidence" type="text" placeholder="e.g. challan DC-104"></div>
+            <label class="check"><input type="checkbox" id="confirm"> Buyer confirms receipt</label>
+            <button class="btn ghost" id="deliver" disabled>Mark delivered</button>
+          </div>
+          <p id="dealStatus" style="font-weight:700"></p>
+          <h2 class="sec" style="margin-top:20px">Impact ledger</h2>
+          <p class="sub" id="ledgerNote"></p>
+          <div class="tablewrap"><table id="ledger"></table></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="road" hidden>
+    <div class="hero"><h1>Textile rolls and fabric remnants</h1><p>Not built. This tab is here so the platform's scope is honest.</p></div>
+    <div class="roadmap">
+      <p>Fabric needs its own engine: pattern pieces are irregular shapes, the roll has a fixed width, grain and stretch restrict orientation, and colour or dye batch must match. Rectangle nesting would give misleading yields.</p>
+      <p>What it would take: irregular-shape nesting (no-fit polygons or a library such as SVGnest), pattern files from buyers (DXF or marker files), and field data from a cluster such as Tiruppur. It would plug into the same core: pooling, recovery plan, deals and ledger work unchanged.</p>
+    </div>
+  </div>
+
+  <section class="block">
+    <h2 class="sec">How the platform is built</h2>
+    <p class="sub">One shared core, one engine per kind of resource. A new resource type is one new engine file; nothing in the core changes.</p>
+    <div class="platform" id="platform"></div>
+  </section>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const inr = v => v == null ? "—" : (v < 0 ? "−₹" : "₹") + Math.abs(Math.round(v)).toLocaleString("en-IN");
+const num = (v, d = 0) => (+v).toLocaleString("en-IN", {maximumFractionDigits: d});
+const plural = w => w.endsWith("f") ? w.slice(0, -1) + "ves" : /(s|x|ch|sh)$/.test(w) ? w + "es" : w + "s";
+const META_KEYS = ["scenario", "title", "engine", "plan_seller", "metric_word"];
+let SCEN = [], KEY = "steel", DATA, META, ON = new Set(), LAST = null, PLAN = {rejected: [], elapsed: 0}, DEAL = null, animate = false;
+
+async function api(path, body) {
+  const r = await fetch(path, {method: body ? "POST" : "GET", headers: {"Content-Type": "application/json"}, body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json();
+  if (!r.ok) throw new Error(typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail));
+  return j;
+}
+const demand = () => DATA.demands.find(d => d.id === $("#demand").value);
+const seller = id => DATA.sellers.find(s => s.id === id);
+const kind = () => META.engine;
+
+// ---------- order fields per engine ----------
+const FIELDS = {
+  flat: [["length_mm", "Length (mm)", 5], ["width_mm", "Width (mm)", 5], ["quantity", "Quantity", 10], ["thickness_mm", "Thickness (mm)", 0.5]],
+  linear: [["cut_length_mm", "Cut length (mm)", 10], ["quantity", "Quantity", 5]],
+  perishable: [["quantity", "Quantity (kg)", 1], ["min_hours_left_on_arrival", "Hours left on arrival, at least", 1]],
+};
+function buildFields() {
+  const d = demand();
+  $("#orderFields").innerHTML = `<div class="row">${FIELDS[kind()].map(([k, l, st]) =>
+    `<div><label for="f_${k}">${l}</label><input id="f_${k}" type="number" min="0" step="${st}" value="${d[k]}"></div>`).join("")}</div>`;
+  FIELDS[kind()].forEach(([k]) => $("#f_" + k).addEventListener("input", schedule));
+}
+function readControls() {
+  const d = demand();
+  FIELDS[kind()].forEach(([k]) => { const v = +$("#f_" + k).value; if (v > 0 || k === "min_hours_left_on_arrival") d[k] = v; });
+  DATA.transport.rate_multiplier = +$("#rate").value; $("#ratev").textContent = DATA.transport.rate_multiplier;
+  if (kind() !== "perishable") { DATA.settings.kerf_mm = +$("#kerf").value; $("#kerfv").textContent = DATA.settings.kerf_mm; }
+}
+let timer; function schedule() { clearTimeout(timer); timer = setTimeout(() => { animate = true; runAll(); }, 220); }
+
+// ---------- load a scenario ----------
+async function loadScenario(key) {
+  KEY = key; PLAN = {rejected: [], elapsed: 0}; DEAL = null;
+  document.querySelectorAll("#tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.key === key));
+  if (key === "textile") { $("#live").hidden = true; $("#road").hidden = false; $("#engineLine").textContent = "Engine: none yet (roadmap)."; return; }
+  $("#live").hidden = false; $("#road").hidden = true;
+  const raw = await api(`/api/scenario/${key}`);
+  META = Object.fromEntries(META_KEYS.map(k => [k, raw[k]])); META_KEYS.forEach(k => delete raw[k]); DATA = raw;
+  const engNames = {flat: "Flat-sheet engine: 2D nesting with kerf, edge margin, grain and defects",
+                    linear: "Bar and tube engine: 1D cutting with kerf, end trims and usable remnants",
+                    perishable: "Perishable engine: shelf life in hours, storage, FSSAI and used-cooking-oil rules"};
+  $("#engineLine").textContent = engNames[kind()] + ".";
+  ON = new Set(DATA.sellers.map(s => s.id));
+  $("#demand").innerHTML = DATA.demands.map(d => `<option value="${d.id}">${d.buyer_name}: ${d.part_name}</option>`).join("");
+  buildFields();
+  $("#rate").value = DATA.transport.rate_multiplier;
+  $("#kerfBox").hidden = kind() === "perishable"; $("#kerf").value = DATA.settings.kerf_mm;
+  $("#sellerToggles").innerHTML = DATA.sellers.map(s => `<label class="check"><input type="checkbox" checked data-id="${s.id}">${s.name}</label>`).join("");
+  document.querySelectorAll("#sellerToggles input").forEach(cb => cb.addEventListener("change", e => {
+    e.target.checked ? ON.add(e.target.dataset.id) : ON.delete(e.target.dataset.id); schedule(); }));
+  const tu = kind() === "perishable" ? "hours" : "days";
+  $("#deadlineLbl").textContent = `Clear within (${tu})`; $("#deadline").value = tu === "hours" ? 12 : 12;
+  $("#stockistBox").hidden = kind() === "perishable";
+  $("#ledgerNote").textContent = kind() === "perishable"
+    ? "Counterfactual: the food would have been thrown away. Landfill diversion is claimed only once the seller's actual disposal route is recorded. CO₂ stays empty until cited factors are added."
+    : (kind() === "flat" && DATA.resources.some(r => r.material === "plywood")
+      ? "Counterfactual: metals would be recycled as scrap; plywood's fate is uncertain until recorded. No landfill diversion is claimed. CO₂ stays empty until cited factors are added."
+      : "Counterfactual: the steel would be sold as scrap and recycled. No landfill diversion is claimed. CO₂ stays empty until cited factors are added.");
+  $("#dealStatus").textContent = ""; $("#accept").disabled = false; $("#dispatch").disabled = true; $("#deliver").disabled = true;
+  await api("/api/reset", {}); refreshLedger();
+  animate = true; runAll();
+}
+
+async function runAll() {
+  readControls();
+  try {
+    LAST = await api("/api/fulfil", {demand_id: demand().id, data: DATA, seller_ids: [...ON]});
+  } catch (e) { $("#headline").textContent = "That order can't be computed."; $("#heroSub").innerHTML = `<span class="err">${e.message}</span>`; return; }
+  drawHero(LAST); drawFloor(LAST); drawValue(LAST); drawMap(LAST); drawSuppliers(LAST);
+  runPlan();
+}
+
+// ---------- hero ----------
+function drawHero(res) {
+  const d = demand(), b = res.best, k = kind();
+  const kg = b ? b.kg_shipped : 0, u = b ? b.units : 0;
+  let h;
+  if (!b || u <= 0) h = `Nothing in this surplus can serve ${d.buyer_name}'s order.`;
+  else if (k === "perishable" && d.buyer_type === "ngo")
+    h = `<span class="dim">A waste bin sees <span class="num">${num(kg, 1)} kg</span> of leftovers.</span><br>${d.buyer_name} gets <span class="num">${num(u, 1)} kg</span> of safe food in <span class="num">${Math.round(b.tour_hours * 60)} minutes</span>.`;
+  else if (k === "perishable")
+    h = `<span class="dim">A waste bin sees <span class="num">${num(kg, 1)} kg</span> of surplus.</span><br>${d.buyer_name} sees <span class="num">${num(u, 1)} kg</span> it can still cook.`;
+  else if (k === "linear")
+    h = `<span class="dim">A scrap dealer sees <span class="num">${num(kg)} kg</span> of ${META.metric_word}.</span><br>${d.buyer_name} sees <span class="num">${num(u)} ${plural(d.part_name)}</span> of ${num(d.cut_length_mm)} mm.`;
+  else
+    h = `<span class="dim">${d.material === "plywood" ? "By weight, that is" : "A scrap dealer sees"} <span class="num">${num(kg)} kg</span> of ${({mild_steel: "surplus steel", stainless_304: "stainless offcuts", aluminium: "aluminium offcuts", plywood: "plywood offcuts", acrylic: "acrylic offcuts"})[d.material] || META.metric_word}.</span><br>${d.buyer_name} sees <span class="num">${num(u)} ${plural(d.part_name)}</span>.`;
+  $("#headline").innerHTML = h;
+  $("#heroSub").textContent = res.feasible
+    ? `${num(u, 1)} of ${num(res.requested, 1)} ${res.unit_name} from ${b.sellers_used.length} seller${b.sellers_used.length > 1 ? "s" : ""}; ${res.rejections.length} item${res.rejections.length === 1 ? "" : "s"} rejected with a reason.`
+    : res.message;
+}
+
+// ---------- floor ----------
+function drawFloor(res) {
+  const d = demand(), b = res.best, k = kind();
+  const alloc = {}; (b ? b.allocations : []).forEach(a => alloc[a.resource_id] = a);
+  const rej = Object.fromEntries(res.rejections.map(r => [r.resource_id, r.reason]));
+  const other = new Set(res.not_relevant);
+  const cap = Object.fromEntries(res.seller_capacity.map(c => [c.seller_id, c]));
+  const used = new Set(b ? b.sellers_used : []);
+  const titles = {flat: ["The cutting floor", "Grey shapes are measured sheets and offcuts, drawn to scale. Yellow shapes are the buyer's parts, placed by the nesting engine. Red outlines are defects the engine cuts around."],
+                  linear: ["The bar rack", "Each line is a bar or pipe end, drawn to scale. Yellow segments are the buyer's cut pieces; the grey tail is the leftover, kept as stock if it's long enough."],
+                  perishable: ["The surplus shelf", "Each row is a lot of food. The green bar shows hours left (a full bar is 48 hours or more); yellow is the share going to this buyer."]};
+  $("#floorTitle").textContent = titles[k][0]; $("#floorSub").textContent = titles[k][1];
+  const yards = $("#yards"); yards.innerHTML = "";
+  for (const s of DATA.sellers) {
+    const mine = DATA.resources.filter(r => r.seller_id === s.id && r.kind === k);
+    if (!mine.length) continue;
+    const units = mine.reduce((a, r) => a + (alloc[r.id] ? alloc[r.id].units : 0), 0);
+    const allOther = mine.every(r => other.has(r.id));
+    const el = document.createElement("article");
+    el.className = "yard" + (ON.has(s.id) ? "" : " off");
+    const c = cap[s.id];
+    el.innerHTML = `<header><h3>${s.name}</h3><span class="meta">${c ? c.distance_km.toFixed(1) : "?"} km away, can supply ${num(c ? c.capacity : 0, 1)}</span></header>
+      <div class="meta">${ON.has(s.id) ? (used.has(s.id) ? `<b>${num(units, 1)} ${res.unit_name}</b> in this order` : allOther ? "nothing here matches this order" : "not needed for this order") : "left out"}${k === "perishable" && !s.fssai_licensed ? "; no FSSAI licence recorded" : ""}</div>`;
+    if (k === "flat") el.appendChild(sheetSvg(mine, alloc, rej, other));
+    else if (k === "linear") el.appendChild(barSvg(mine, alloc, rej, other));
+    else el.appendChild(lotList(mine, alloc, rej, other));
+    yards.appendChild(el);
+  }
+  const L = {flat: [["var(--paint)", "Buyer's part"], ["var(--steel)", "Piece used"], ["var(--steel-dim)", "Compatible, not needed"], ["hatch", "Rejected (hover for reason)"], ["defect", "Defect"], ["other", "Different material"]],
+             linear: [["var(--paint)", "Cut piece"], ["var(--steel)", "Bar used"], ["var(--steel-dim)", "Compatible, not needed"], ["hatch", "Rejected (hover for reason)"], ["other", "Different section"]],
+             perishable: [["var(--fresh)", "Hours left"], ["var(--paint)", "Going to this buyer"]]}[k];
+  $("#legend").innerHTML = L.map(([c, t]) => `<span><i class="sw" style="${c === "hatch" ? "background:repeating-linear-gradient(45deg,#fff 0 3px,var(--rust) 3px 4px)" : c === "defect" ? "background:#fff;border:2px solid var(--rust)" : c === "other" ? "background:#fff;border:1px dashed var(--steel-edge)" : "background:" + c}"></i>${t}</span>`).join("");
+  animate = false;
+}
+const NS = "http://www.w3.org/2000/svg";
+function svgEl(w, h, html) { const s = document.createElementNS(NS, "svg"); s.setAttribute("viewBox", `-1 -1 ${w + 2} ${h + 2}`); s.innerHTML = html; return s; }
+const HATCH = `<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#fff"/><line x1="0" y1="0" x2="0" y2="6" stroke="#9A4A2B" stroke-width="1.4"/></pattern></defs>`;
+function sheetSvg(pcs, alloc, rej, other) {
+  const W = 640, gap = 14, sc = 0.105;
+  const order = [...pcs].sort((a, b) => (b.is_full_sheet - a.is_full_sheet) || (b.length_mm * b.width_mm - a.length_mm * a.width_mm));
+  let x = 0, y = 0, rowH = 0; const boxes = [];
+  for (const p of order) { const w = p.length_mm * sc, h = p.width_mm * sc;
+    if (x + w > W && x > 0) { x = 0; y += rowH + gap; rowH = 0; } boxes.push({p, x, y, w, h}); x += w + gap; rowH = Math.max(rowH, h); }
+  let html = HATCH, i = 0;
+  for (const b of boxes) {
+    const a = alloc[b.p.id], r = rej[b.p.id], parts = a ? a.parts : [];
+    const o = other.has(b.p.id), fill = o ? "#fff" : r ? "url(#hatch)" : parts.length ? "var(--steel)" : "var(--steel-dim)";
+    html += `<g opacity="${o ? .55 : 1}"><title>${b.p.id}: ${b.p.length_mm} × ${b.p.width_mm} × ${b.p.thickness_mm} mm, ${b.p.material.replace("_", " ")} ${b.p.grade}, ${b.p.condition}${b.p.grain_along_length === true ? ", grain along length" : b.p.grain_along_length === false ? ", grain across" : ""}${o ? " — different material" : r ? " — rejected: " + r : parts.length ? ` — ${parts.length} parts` : ""}</title>
+      <rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" fill="${fill}" stroke="var(--steel-edge)" stroke-dasharray="${o ? "4 3" : "none"}"/>`;
+    if (b.p.grain_along_length != null) for (let gy = b.y + 4; gy < b.y + b.h; gy += 6) if (b.p.grain_along_length) html += `<line x1="${b.x + 2}" x2="${b.x + b.w - 2}" y1="${gy}" y2="${gy}" stroke="#fff" stroke-opacity=".35"/>`;
+    for (const q of parts) html += `<rect class="part${animate ? " new" : ""}" style="animation-delay:${Math.min(i++ * 2, 800)}ms" x="${b.x + q.x * sc}" y="${b.y + q.y * sc}" width="${q.length * sc}" height="${q.width * sc}" fill="var(--paint)" stroke="var(--paint-edge)" stroke-width=".5"/>`;
+    for (const d of b.p.defects || []) html += `<rect x="${b.x + d.x_mm * sc}" y="${b.y + d.y_mm * sc}" width="${d.length_mm * sc}" height="${d.width_mm * sc}" fill="none" stroke="var(--rust)" stroke-width="2"><title>${d.note || "defect"}</title></rect>`;
+    html += `</g>`;
+  }
+  return svgEl(W, y + rowH, html);
+}
+function barSvg(bars, alloc, rej, other) {
+  const W = 640, sc = (W - 170) / 6000, rowH = 22;
+  const order = [...bars].sort((a, b) => b.length_mm - a.length_mm);
+  let html = HATCH, i = 0;
+  order.forEach((b, n) => {
+    const y = n * rowH, a = alloc[b.id], r = rej[b.id], w = b.length_mm * sc;
+    const o = other.has(b.id), fill = o ? "#fff" : r ? "url(#hatch)" : a ? "var(--steel)" : "var(--steel-dim)";
+    html += `<g opacity="${o ? .55 : 1}"><title>${b.id}: ${b.profile}, ${num(b.length_mm)} mm, ${b.mass_per_m_kg} kg/m, ${b.grade}, ${b.condition}${o ? " — different section" : r ? " — rejected: " + r : a ? ` — ${a.units} cuts, leftover ${num(a.remnant_mm)} mm${a.remnant_usable ? " (kept as stock)" : ""}` : ""}</title>
+      <rect x="0" y="${y + 4}" width="${w}" height="12" fill="${fill}" stroke="var(--steel-edge)" stroke-dasharray="${o ? "4 3" : "none"}"/>`;
+    if (a) for (const c of a.cuts) html += `<rect class="part${animate ? " new" : ""}" style="animation-delay:${Math.min(i++ * 20, 800)}ms" x="${c.start_mm * sc}" y="${y + 4}" width="${c.length_mm * sc}" height="12" fill="var(--paint)" stroke="var(--paint-edge)" stroke-width=".6"/>`;
+    html += `<text x="${w + 6}" y="${y + 14}" font-size="10.5" fill="var(--muted)">${b.profile}${a && a.remnant_usable ? ", leftover kept" : ""}</text></g>`;
+  });
+  return svgEl(W, order.length * rowH, html);
+}
+function lotList(lots, alloc, rej, other) {
+  const ul = document.createElement("ul"); ul.className = "lots";
+  ul.innerHTML = [...lots].sort((a, b) => a.hours_left - b.hours_left).map(l => {
+    const a = alloc[l.id], r = rej[l.id], pct = Math.min(100, l.hours_left / 48 * 100), got = a ? a.units / l.quantity_kg * pct : 0;
+    return `<li><div class="tagline"><span><b>${l.product}</b>, ${num(l.quantity_kg, 1)} kg, ${l.storage}</span><span class="meta">${num(l.hours_left)} h left</span></div>
+      <div class="bar" title="${num(l.hours_left)} hours left"><i style="width:${pct}%"></i>${a ? `<b style="width:${got}%"></b>` : ""}</div>
+      ${a ? `<div class="meta">${num(a.units, 1)} kg to this buyer</div>` : ""}${r ? `<div class="why">${r}</div>` : ""}${other.has(l.id) ? `<div class="meta">not a category this buyer takes</div>` : ""}</li>`;
+  }).join("");
+  return ul;
+}
+
+// ---------- value, map, suppliers ----------
+function drawValue(res) {
+  const b = res.best, k = kind(), d = demand();
+  if (!b) { $("#bars").innerHTML = ""; $("#fulfilMsg").innerHTML = `<div class="msg bad">${res.message}</div>`; return; }
+  const v = b.value, max = Math.max(Math.abs(v.buyer_value_W), Math.abs(v.salvage_value_S), v.transport_T, 1);
+  const bar = (label, val, color, note) => `<div class="vbar"><span>${label}</span><div class="track"><div class="fill" style="width:${Math.abs(val) / max * 100}%;background:${color}"></div></div><b>${inr(val)}</b> <span style="display:inline">${note}</span></div>`;
+  const salvageLabel = k === "perishable" ? (v.salvage_value_S < 0 ? "Thrown away (disposal cost)" : "Salvage") : "Sold as scrap, by weight";
+  const prodLabel = v.is_donation ? `Donated: ${num(b.units, 1)} kg of food` : `Worth to the buyer as ${num(b.units, 1)} ${res.unit_name}`;
+  const prodNote = v.is_donation ? "no money changes hands" : k === "perishable" ? "what the buyer pays its usual supplier" : "what the same pieces would cost from new stock";
+  $("#bars").innerHTML = bar(salvageLabel, v.salvage_value_S, "var(--rust)", `${num(b.kg_shipped, 1)} kg`) +
+    bar(prodLabel, v.buyer_value_W, "var(--paint)", prodNote) +
+    bar("Pickup transport", v.transport_T, "var(--steel-edge)", `${b.vehicle || ""}, ${b.route_km} km, ${b.trips} trip${b.trips > 1 ? "s" : ""}`);
+  $("#fulfilMsg").innerHTML = `<div class="msg ${res.feasible ? "good" : "bad"}">${res.message}<br>
+    ${res.feasible && !v.is_donation ? `Sellers gain <b>${inr(v.seller_gain_above_salvage)}</b> above salvage; the buyer saves <b>${inr(v.buyer_saving)}</b>. ` : ""}<span class="tag sample">sample prices</span></div>`;
+  $("#accept").disabled = !(res.feasible && Math.abs(b.units - res.requested) < 1e-6) || !!DEAL;
+}
+function drawMap(res) {
+  const d = demand(), b = res.best, pts = DATA.sellers.map(s => [s.x_km, s.y_km]).concat([[d.x_km, d.y_km]]);
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  const minx = Math.min(...xs) - 1, maxx = Math.max(...xs) + 1, miny = Math.min(...ys) - 1, maxy = Math.max(...ys) + 1;
+  const k = Math.min(140 / (maxx - minx), 180 / (maxy - miny));
+  const X = x => 160 - (maxx - minx) * k / 2 + (x - minx) * k, Y = y => 210 - (y - miny) * k;
+  let h = "";
+  if (b && b.pickup_order.length) {
+    const seq = [[d.x_km, d.y_km], ...b.pickup_order.map(id => [seller(id).x_km, seller(id).y_km]), [d.x_km, d.y_km]];
+    h += `<polyline points="${seq.map(p => X(p[0]) + "," + Y(p[1])).join(" ")}" fill="none" stroke="var(--ink)" stroke-width="2" stroke-dasharray="5 4"/>`;
+  }
+  for (const s of DATA.sellers) {
+    const u = b && b.sellers_used.includes(s.id), left = s.x_km < d.x_km;
+    h += `<circle cx="${X(s.x_km)}" cy="${Y(s.y_km)}" r="7" fill="${u ? "var(--paint)" : ON.has(s.id) ? "var(--steel-dim)" : "#fff"}" stroke="var(--ink)"/>
+      <text x="${X(s.x_km) + (left ? -11 : 11)}" y="${Y(s.y_km) + (s.y_km > d.y_km ? -10 : 16)}" text-anchor="${left ? "end" : "start"}" font-size="11" fill="var(--ink)">${s.name}</text>`;
+  }
+  h += `<rect x="${X(d.x_km) - 7}" y="${Y(d.y_km) - 7}" width="14" height="14" fill="var(--ink)"/><text x="${X(d.x_km)}" y="${Y(d.y_km) + 22}" text-anchor="middle" font-size="11" font-weight="700" fill="var(--ink)">${d.buyer_name}</text>`;
+  $("#minimap").innerHTML = h;
+  $("#routeTxt").textContent = b && b.pickup_order.length ? `Pickup order: ${b.pickup_order.map(id => seller(id).name).join(", ")}; ${b.route_km} km round trip, about ${Math.round(b.tour_hours * 60)} minutes.` : "";
+}
+function drawSuppliers(res) {
+  const b = res.best;
+  if (!b) { $("#perSeller").innerHTML = ""; $("#alts").textContent = ""; return; }
+  const kgCol = res.unit_name !== "kg";
+  $("#perSeller").innerHTML = `<tr><th>Seller</th><th class="r">${res.unit_name}</th><th>Items used</th>${kgCol ? '<th class="r">kg</th>' : ""}<th class="r">Salvage value</th><th class="r">Gain above salvage</th></tr>` +
+    b.per_seller.map(s => `<tr><td>${s.seller_name}</td><td class="r">${num(s.units, 1)}</td><td>${s.resources_used.join(", ")}</td>${kgCol ? `<td class="r">${num(s.kg_shipped, 1)}</td>` : ""}<td class="r">${inr(s.salvage_value)}</td><td class="r">${inr(s.gain_above_salvage)}</td></tr>`).join("");
+  $("#alts").textContent = res.alternatives.length ? "Next-best combinations: " + res.alternatives.map(a => `${a.sellers_used.map(id => seller(id).name).join(" + ")} (${inr(a.value.gain_G)}, ${a.route_km} km)`).join("; ") : "No other combination of sellers can fill this order.";
+}
+
+// ---------- plan ----------
+async function runPlan() {
+  try {
+    const r = await api("/api/seller-plan", {seller_id: META.plan_seller, kind: kind(), data: DATA, deadline: +$("#deadline").value,
+      stockist_price_per_kg: kind() === "perishable" ? null : +$("#stockist").value, rejected_route_ids: PLAN.rejected, elapsed: PLAN.elapsed});
+    const p = r.plan, u = p.time_unit, names = Object.fromEntries(r.routes.map(x => [x.id, x]));
+    $("#planTitle").textContent = `Recovery plan for ${r.seller_name}`;
+    const endName = kind() === "perishable" ? "Dispose" : "Scrap";
+    $("#planSteps").innerHTML = PLAN.rejected.map(id => `<div class="step rejected"><h4>${names[id] ? names[id].name : id}</h4><small>said no</small></div>`).join("") +
+      p.best.steps.map(s => `<div class="step"><h4>${s.name}</h4><small>${u === "hours" ? "hour" : "day"} ${s.start + PLAN.elapsed}–${s.end + PLAN.elapsed}</small><small>${inr(s.value_to_seller)} if it closes</small><small>chance ${Math.round(s.p_close * 100)}% <span class="tag mod">assumption</span></small></div>`).join("") +
+      `<div class="step end"><h4>${endName}</h4><small>${inr(r.salvage_value_all)}</small><small>${p.salvage_executable ? "firm offer" : "estimate, no firm offer"}</small></div>`;
+    $("#planWhy").textContent = p.explanation;
+    $("#planWarn").innerHTML = p.warnings.map(w => `<p class="warn">${w}</p>`).join("");
+    const first = p.best.steps[0];
+    $("#reject").disabled = !first; $("#reject").dataset.first = first ? first.route_id : ""; $("#reject").dataset.t = first ? first.end : 0;
+    $("#routesTbl").innerHTML = `<tr><th>Route</th><th class="r">Seller ends with</th><th class="r">Chance</th><th class="r">Window</th></tr>` +
+      r.routes.map(x => `<tr><td>${x.name}</td><td class="r">${inr(x.value_to_seller)}</td><td class="r">${Math.round(x.p_close * 100)}%</td><td class="r">${x.window} ${u}</td></tr>`).join("") +
+      `<tr><td>${endName}, everything</td><td class="r">${inr(r.salvage_value_all)}</td><td class="r">—</td><td class="r">—</td></tr>`;
+  } catch (e) { $("#planWhy").innerHTML = `<span class="err">${e.message}</span>`; $("#planSteps").innerHTML = ""; }
+}
+
+// ---------- deal and ledger ----------
+async function refreshLedger() {
+  const r = await api("/api/ledger", {});
+  if (!r.deals.length) { $("#ledger").innerHTML = `<tr><td>No deals yet. Accept the order above to create one.</td></tr>`; return; }
+  const tag = l => l === "verified" ? "ver" : l === "simulated" ? "sim" : l === "modelled" ? "mod" : "sample";
+  const dl = r.deals[0];
+  $("#ledger").innerHTML = `<tr><th>Deal ${dl.id}: ${dl.buyer_name}, ${dl.status}</th><th class="r">Value</th><th>Label</th></tr>` +
+    dl.impact.metrics.map(m => `<tr><td>${m.metric}${m.note ? `<br><small style="color:var(--muted)">${m.note}</small>` : ""}${m.source ? `<br><small style="color:var(--muted)">${m.source}</small>` : ""}</td>
+      <td class="r">${m.value == null ? "—" : m.unit === "INR" ? inr(m.value) : num(m.value, 1) + " " + m.unit}</td><td><span class="tag ${tag(m.label)}">${m.label}</span></td></tr>`).join("");
+}
+
+async function init() {
+  SCEN = await api("/api/scenarios");
+  $("#tabs").innerHTML = SCEN.map(s => `<button role="tab" data-key="${s.key}">${s.title}</button>`).join("") + `<button role="tab" class="road" data-key="textile">Textile (not built)</button>`;
+  document.querySelectorAll("#tabs button").forEach(b => b.addEventListener("click", () => loadScenario(b.dataset.key)));
+  const eng = await api("/api/engines");
+  const desc = {flat: "2D nesting: steel, stainless, aluminium, plywood, acrylic", linear: "1D cutting: bars, rods, pipes, tubes", perishable: "Shelf life, storage, food-safety rules"};
+  $("#platform").innerHTML = `<div><b>Shared core</b>Sellers, orders, compatibility reasons, pooling across sellers, pickup routing, recovery plan, deals, impact ledger</div>` +
+    eng.map(e => `<div><b>${({flat: "Flat-sheet engine", linear: "Bar and tube engine", perishable: "Perishable engine"})[e.kind] || e.kind}</b>${desc[e.kind]}. Unit: ${e.unit_name}; plan in ${e.time_unit}.</div>`).join("") +
+    `<div class="not"><b>Textile engine</b>Not built: needs irregular-shape nesting</div><div class="not"><b>Cross-industry by-products</b>Not built: needs a curated, sourced compatibility table</div>`;
+  $("#demand").addEventListener("change", () => { buildFields(); PLAN = {rejected: [], elapsed: 0}; schedule(); });
+  ["#rate", "#kerf"].forEach(s => $(s).addEventListener("input", schedule));
+  ["#deadline", "#stockist"].forEach(s => $(s).addEventListener("input", () => { PLAN = {rejected: [], elapsed: 0}; runPlan(); }));
+  $("#reject").addEventListener("click", e => { PLAN.rejected.push(e.target.dataset.first); PLAN.elapsed += +e.target.dataset.t; runPlan(); });
+  $("#resetPlan").addEventListener("click", () => { PLAN = {rejected: [], elapsed: 0}; runPlan(); });
+  $("#accept").addEventListener("click", async () => {
+    const b = LAST.best, d = demand();
+    DEAL = await api("/api/deals", {kind: kind(), counterfactual: b.counterfactual[0], demand_id: d.id, buyer_name: d.buyer_name,
+      sellers: b.sellers_used, units: b.units, unit_name: LAST.unit_name, kg_in_units: b.kg_in_units, kg_shipped: b.kg_shipped,
+      route_km: b.route_km, value_above_salvage: b.value.seller_gain_above_salvage, buyer_utilisation: d.buyer_utilisation ?? null, is_simulated: true});
+    $("#dealStatus").textContent = `Deal ${DEAL.id} agreed with ${d.buyer_name} (simulated buyer).`;
+    $("#accept").disabled = true; $("#dispatch").disabled = false; refreshLedger();
+  });
+  $("#dispatch").addEventListener("click", async () => { await api(`/api/deals/${DEAL.id}/advance`, {status: "dispatched"});
+    $("#dealStatus").textContent = `Deal ${DEAL.id} dispatched.`; $("#dispatch").disabled = true; $("#deliver").disabled = false; refreshLedger(); });
+  $("#deliver").addEventListener("click", async () => {
+    const ev = $("#evidence").value.trim();
+    try { await api(`/api/deals/${DEAL.id}/advance`, {status: "delivered", evidence: ev ? [ev] : [], buyer_confirmed: $("#confirm").checked});
+      $("#dealStatus").textContent = `Deal ${DEAL.id} delivered.`; $("#deliver").disabled = true; refreshLedger();
+    } catch (e) { $("#dealStatus").innerHTML = `<span class="err">${e.message}</span>`; }
+  });
+  loadScenario("steel");
+}
+init();
+</script>
+</body>
+</html>
