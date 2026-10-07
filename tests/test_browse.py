@@ -90,3 +90,42 @@ def test_photo_upload_is_checked():
     assert post(b"\x89PNG\r\n\x1a\n" + b"0" * main.PHOTO_MAX, "image/png").status_code == 413
     assert post(PNG, "image/png", rid="ZZ").status_code == 404
     assert c.post("/api/photo/nowhere/A1", content=PNG, headers={"Content-Type": "image/png"}).status_code == 404
+
+
+# ---------------- illustrative photos ----------------
+def test_illustrative_photo_matches_the_kind_of_item_and_is_credited():
+    dur, fresh = items("durable"), items("fresh")
+    assert dur["steel:A1"]["illustrative"]["url"] == "/static/illustrative/mild_steel.jpg"
+    assert dur["sheets:Fp1"]["illustrative"]["url"].endswith("plywood.jpg")
+    assert dur["bars:G1"]["illustrative"]["url"].endswith("steel_bars_pipes.jpg")
+    assert dur["sheets:Ass1"]["illustrative"] is None  # no stainless photo: show none rather than a wrong one
+    assert fresh["food:H1"]["illustrative"]["url"].endswith("tomatoes.jpg")
+    assert fresh["food:C2"]["illustrative"]["url"].endswith("cooked_rice.jpg")  # biryani
+    assert fresh["food:K3"]["illustrative"] is None  # used cooking oil
+    for it in [*dur.values(), *fresh.values()]:
+        il = it["illustrative"]
+        if il:
+            assert il["author"] and il["licence"] and il["source_url"].startswith("https://commons.wikimedia.org/")
+            assert c.get(il["url"]).status_code == 200
+
+
+def test_seller_photo_replaces_the_illustrative_one():
+    assert items("durable")["steel:A1"]["illustrative"] is not None
+    c.post("/api/photo/steel/A1", content=PNG, headers={"Content-Type": "image/png"})
+    a1 = items("durable")["steel:A1"]
+    assert a1["photo"] and a1["illustrative"] is None
+
+
+def test_every_illustrative_photo_has_a_reusable_licence():
+    import json
+    credits = json.loads((main.ROOT / "static" / "illustrative" / "credits.json").read_text(encoding="utf-8"))
+    assert 8 <= len(credits) <= 12
+    for key, cr in credits.items():
+        assert (main.ROOT / "static" / "illustrative" / f"{key}.jpg").exists()
+        assert cr["licence"] in ("CC0", "Public domain") or cr["licence"].startswith(("CC BY 2", "CC BY 3", "CC BY 4", "CC BY-SA"))
+        assert "NC" not in cr["licence"] and "ND" not in cr["licence"]
+
+
+def test_passport_upload_opens_the_camera_on_phones():
+    page = c.get("/passport/steel/A1").text
+    assert 'accept="image/*"' in page and 'capture="environment"' in page

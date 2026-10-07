@@ -21,13 +21,14 @@ async function api(path, body) {
 const LANES = {durable: {name: "Durable", cls: "np", scen: ["steel", "sheets", "bars"]}, fresh: {name: "Fresh", cls: "pe", scen: ["food"]}};
 const ROLES = {buyer: "Buyer", seller: "Seller", admin: "Admin"};
 const NAV = {
-  buyer: [["browse", "Browse surplus"], ["match", "Order and match"], ["deals", "My deals"]],
-  seller: [["connect", "Connect your system"], ["gapfill", "Sold before it's cut", "durable"], ["offers", "Offers and recovery plan"], ["stock", "Stock and passports"]],
+  buyer: [["browse", "Browse surplus"], ["match", "Order and match"], ["deals", "My deals"], ["pickup", "Pickup and delivery"]],
+  seller: [["connect", "Connect your system"], ["gapfill", "Sold before it's cut", "durable"], ["offers", "Offers and recovery plan"], ["stock", "Stock and passports"], ["pickup", "Pickup and delivery"]],
   admin: [["monitor", "Deal monitor"], ["quality", "Data quality"], ["prices", "Price references"], ["rules", "Rules"], ["sim", "Simulation lab"]],
 };
 const TITLES = {
   connect: ["Connect your system", "Import from ERP or POS export (CSV). Upload the stock file your system exports; the engine checks every row and finds the surplus."],
   browse: ["Browse surplus", "Every piece and lot on offer, drawn to scale, with its seller, distance and price range."],
+  pickup: ["Pickup and delivery", "Route, vehicle and transport cost come from the engine. Book a slot, print the papers, track the deal."],
   match: ["Order and match", "Say what you need. The engine checks every seller's stock, nests the parts and finds the cheapest pickup."],
   deals: ["My deals", "Track each order from agreed to dispatched to delivered."],
   gapfill: ["Sold before it's cut", "Fill the empty space in your cutting plan with parts your neighbours have already ordered."],
@@ -159,7 +160,9 @@ function listingCard(it, lane) {
         <p class="note">Floor: scrap value, ${priceSrc(it.floor, "scrap")}.<br>${c ? `Ceiling: same ${flat ? "steel from new sheet" : "material from new stock"} at the buyer's new price ₹${num(c.price_per_kg, 1)}/kg · ${esc(cap(c.label))}.` : "No ceiling: no buyer in this cluster has a new price for this material."}</p>`;
     } else price = `<div class="lprice"><b>–</b><span>No price yet</span></div><p class="note">Imported stock has no scrap quote yet. A dated quote is needed before a price is shown.</p>`;
   }
-  const photo = it.photo ? `<figure class="lphoto"><img src="${esc(it.photo)}" alt="Photo of ${esc(it.id)} uploaded by the seller" loading="lazy"><figcaption class="note">Photo uploaded by the seller</figcaption></figure>` : "";
+  const il = it.illustrative, credit = il ? `Illustrative photo: ${il.shows}. "${il.title}" by ${il.author}, ${il.licence}, via Wikimedia Commons` : "";
+  const photo = it.photo ? `<figure class="lphoto"><img src="${esc(it.photo)}" alt="Photo of ${esc(it.id)} uploaded by the seller" loading="lazy"><figcaption class="ptag seller">Photo uploaded by the seller</figcaption></figure>`
+    : il ? `<figure class="lphoto illus" title="${esc(credit)}"><img src="${esc(il.url)}" alt="${esc(credit)}" loading="lazy"><figcaption class="ptag">Illustrative photo, not the actual item · <a href="${esc(il.source_url)}" target="_blank" rel="noopener" title="${esc(credit)}">Credit</a></figcaption></figure>` : "";
   const dist = it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km`;
   const uid = `${it.key}:${it.id}`;
   return `<article class="lcard ${durable ? "np" : "pe"}" aria-label="${esc(it.id)}">${photo}<div class="lmedia">${media}</div>
@@ -265,10 +268,12 @@ async function vMatch(el) {
       try {
         const deal = await api("/api/deals", {kind: S.meta.engine, counterfactual: b.counterfactual[0], demand_id: d.id, buyer_name: d.buyer_name,
           sellers: b.sellers_used, units: b.units, unit_name: f.unit_name, kg_in_units: b.kg_in_units, kg_shipped: b.kg_shipped,
-          route_km: b.route_km, value_above_salvage: b.value.seller_gain_above_salvage, buyer_utilisation: d.buyer_utilisation ?? null});
+          route_km: b.route_km, value_above_salvage: b.value.seller_gain_above_salvage, buyer_utilisation: d.buyer_utilisation ?? null,
+          scenario: k, rate_multiplier: rate});
         st.lastDeal = deal.id;
-        $("#acceptMsg", el).innerHTML = `Deal ${deal.id} agreed (simulated). <a href="#buyer/deals/${st.lane}" id="toDeals">Track it in My deals</a>`;
+        $("#acceptMsg", el).innerHTML = `Deal ${deal.id} agreed (simulated). <a href="#buyer/deals/${st.lane}" id="toDeals">Track it in My deals</a> or <a href="#buyer/pickup/${st.lane}" id="toPickup">book the pickup</a>.`;
         $("#toDeals", el).onclick = ev => { ev.preventDefault(); go({view: "deals"}); };
+        $("#toPickup", el).onclick = ev => { ev.preventDefault(); go({view: "pickup"}); };
       } catch (e) { $("#acceptMsg", el).innerHTML = `<span class="err">${esc(e.message)}</span>`; acc.disabled = false; }
     };
   }
@@ -515,6 +520,99 @@ async function vStock(el) {
   $("#sf", el).onchange = e => { st.sellerFilter = e.target.value; render(); };
 }
 
+/* ---------------- Buyer and seller: pickup and delivery (simulated transport) ---------------- */
+const STAGES = [["agreed", "Agreed"], ["booked", "Pickup booked"], ["dispatched", "Collected"], ["delivered", "Delivered"]];
+function routeSvg(lg) {
+  const pts = [{name: lg.buyer.name, x: lg.buyer.x_km, y: lg.buyer.y_km, buyer: true}, ...lg.collect.map(c => ({name: c.seller_name, x: c.x_km, y: c.y_km, n: c.stop}))];
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y), pad = 1.2;
+  const x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
+  const W = innerWidth < 600 ? 380 : 640, H = Math.max(260, Math.min(420, W * (y1 - y0) / Math.max(1, x1 - x0))), sc = Math.min(W / (x1 - x0), H / (y1 - y0));
+  const X = x => (x - x0) * sc + (W - (x1 - x0) * sc) / 2, Y = y => H - ((y - y0) * sc + (H - (y1 - y0) * sc) / 2);
+  const stops = [pts[0], ...pts.slice(1), pts[0]];
+  let g = `<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" style="fill:var(--acc)"/></marker></defs>`;
+  for (let k = Math.ceil(x0); k <= x1; k++) g += `<line x1="${X(k)}" y1="0" x2="${X(k)}" y2="${H}" style="stroke:var(--line);stroke-width:1"/>`;
+  for (let k = Math.ceil(y0); k <= y1; k++) g += `<line x1="0" y1="${Y(k)}" x2="${W}" y2="${Y(k)}" style="stroke:var(--line);stroke-width:1"/>`;
+  lg.legs.forEach((l, i) => {
+    const a = stops[i], b = stops[i + 1], ax = X(a.x), ay = Y(a.y), bx = X(b.x), by = Y(b.y), len = Math.hypot(bx - ax, by - ay) || 1;
+    const ux = (bx - ax) / len, uy = (by - ay) / len, r = 16, mx = (ax + bx) / 2, my = (ay + by) / 2;
+    g += `<line x1="${ax + ux * r}" y1="${ay + uy * r}" x2="${bx - ux * (r + 2)}" y2="${by - uy * (r + 2)}" marker-end="url(#arr)" style="stroke:var(--acc);stroke-width:2.5"/>`;
+    g += `<g transform="translate(${mx - uy * 14},${my + ux * 14})"><circle r="11" style="fill:var(--panel);stroke:var(--acc);stroke-width:2"/><text y="4" text-anchor="middle" style="font:600 11px var(--mono);fill:var(--fg)">${l.n}</text></g>`;
+    g += `<text x="${mx + uy * 30}" y="${my - ux * 30 + 4}" text-anchor="middle" class="halo" style="font:500 11px var(--mono);fill:var(--mut)">${num(l.km, 2)} km</text>`;
+  });
+  pts.forEach(p => {
+    const x = X(p.x), y = Y(p.y);
+    g += p.buyer ? `<rect x="${x - 13}" y="${y - 13}" width="26" height="26" rx="4" style="fill:var(--np);stroke:var(--panel);stroke-width:2"/><text x="${x}" y="${y + 4}" text-anchor="middle" style="font:700 11px var(--body);fill:#fff">B</text>`
+      : `<circle cx="${x}" cy="${y}" r="13" style="fill:var(--own);stroke:var(--panel);stroke-width:2"/><text x="${x}" y="${y + 4}" text-anchor="middle" style="font:700 11px var(--body);fill:#fff">S${p.n}</text>`;
+    g += `<text x="${x}" y="${y + 30}" text-anchor="middle" class="halo" style="font:600 12px var(--body);fill:var(--fg)">${esc(p.name)}</text>`;
+  });
+  return `<svg class="routemap" viewBox="0 0 ${W} ${H}" role="img" aria-label="Pickup route: ${esc(lg.legs.map(l => `${l.n}. ${l.from} to ${l.to}, ${num(l.km, 2)} km`).join("; "))}">${g}</svg>`;
+}
+async function vPickup(el) {
+  const r = await api("/api/ledger", {});
+  const fresh = st.lane === "fresh", mine = r.deals.filter(d => (d.kind === "perishable") === fresh);
+  if (!mine.length) {
+    el.innerHTML = `<p class="callout note">Transporters and bookings are simulated in this prototype. No live booking with any logistics company.</p>
+      <div class="empty">No accepted ${fresh ? "Fresh" : "Durable"} deals yet. Accept an order in <a href="#buyer/match/${st.lane}" id="toMatch">Buyer &gt; Order and match</a>, then come back to book the pickup.</div>`;
+    $("#toMatch", el).onclick = e => { e.preventDefault(); go({role: "buyer", view: "match"}); };
+    return;
+  }
+  const id = mine.some(d => d.id === st.lastDeal) ? st.lastDeal : mine[0].id;
+  const lg = await api(`/api/deals/${id}/logistics`);
+  const dl = lg.deal, bk = lg.booking, v = lg.vehicle;
+  const reached = {agreed: true, booked: !!bk || dl.status !== "agreed", dispatched: dl.status !== "agreed", delivered: dl.status === "delivered"};
+  const cur = dl.status === "delivered" ? "delivered" : dl.status === "dispatched" ? "dispatched" : bk ? "booked" : "agreed";
+  const tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);
+  const cap = (v.payload_kg || 0) * (v.trips || 1);
+  let h = `<p class="callout note">Transporters and bookings are simulated in this prototype. No live booking with any logistics company.</p>
+    <div class="card noprint"><div class="ctrl"><label class="field">Deal<select id="pkDeal">${mine.map(d => `<option value="${d.id}" ${d.id === id ? "selected" : ""}>#${d.id} · ${esc(d.buyer_name)} · from ${d.sellers.map(esc).join(", ")}</option>`).join("")}</select></label>
+      <div class="grow"></div><a class="btn" href="/deals/${id}/pickup-sheet" target="_blank" rel="noopener">Print pickup sheet</a><a class="btn" href="/deals/${id}/challan" target="_blank" rel="noopener">Print delivery challan</a></div></div>`;
+  h += `<div class="card"><div class="ctrl"><h2>Deal #${id} status</h2>${chip(dl.is_simulated ? "simulated" : "verified")}</div><ol class="tracker">${STAGES.map(([k, t]) => `<li class="${reached[k] ? "done" : ""} ${k === cur ? "cur" : ""}"><span>${t}</span></li>`).join("")}</ol>
+    <div class="ctrl" id="pkAct">${
+      dl.status === "agreed" ? `<button class="btn ${bk ? "pri" : ""}" id="pkCollect" type="button" ${bk ? "" : "disabled"}>Mark collected</button><span class="note">${bk ? "Press when the driver has collected from every seller." : "Book a pickup slot first."}</span>`
+      : dl.status === "dispatched" ? `<label class="field">Delivery evidence<input id="pkEv" placeholder="Signed challan no., e.g. SIM-${String(id).padStart(5, "0")}" style="width:260px"></label><label class="check"><input type="checkbox" id="pkConf"> Buyer confirms receipt</label><button class="btn pri" id="pkDeliver" type="button" disabled>Mark delivered</button>`
+      : `<span class="pill p-ok">Delivered</span><span class="note">Evidence: ${dl.evidence.map(esc).join(", ") || "none"} · buyer ${dl.buyer_confirmed ? "confirmed" : "has not confirmed"}.</span>`}</div>
+    <p class="note" id="pkMsg" aria-live="polite">Delivered needs delivery evidence and the buyer's confirmation. A simulated deal stays simulated.</p></div>`;
+  h += `<div class="cols"><div class="card"><h2>Pickup route</h2>${routeSvg(lg)}
+      <div class="leg"><span><i style="background:var(--np)"></i>B = buyer, start and end</span><span><i style="background:var(--own)"></i>S1, S2 … = pickup stops in the engine's order</span></div>
+      <div class="scroll"><table><tr><th class="n">Leg</th><th>From</th><th>To</th><th class="n">km</th></tr>${lg.legs.map(l => `<tr><td class="n">${l.n}</td><td>${esc(l.from)}</td><td>${esc(l.to)}</td><td class="n">${num(l.km, 2)}</td></tr>`).join("")}<tr><td></td><td colspan="2"><b>Round trip (engine)</b></td><td class="n"><b>${num(lg.route_km, 2)}</b></td></tr></table></div>
+      <p class="note">Straight lines on the sample km grid, not roads.</p></div>
+    <div class="card"><h2>Vehicle the engine chose</h2><div class="fig"><div class="g"><b>${inr(v.transport_cost)}</b><span>Transport cost</span></div><div><b>${esc(cap1(v.name))}</b><span>${v.trips} ${v.trips === 1 ? "trip" : "trips"}</span></div><div><b>${num(lg.tour_hours * 60)} min</b><span>Tour at ${num(lg.speed_kmph)} km/h</span></div></div>
+      <div><div class="ctrl"><span class="lbl">Load against payload</span><div class="grow"></div><span class="note">${num(v.load_kg, 1)} kg of ${num(cap)} kg</span></div><div class="bar ${v.load_kg > cap ? "bad" : "warn"}" role="img" aria-label="${num(v.load_kg, 1)} kg of ${num(cap)} kg payload"><i style="width:${Math.min(100, v.load_kg / Math.max(cap, 1) * 100)}%"></i></div></div>
+      <p class="note">Cheapest vehicle for this load and route, from the engine. Rates are ${esc(v.label)} data${v.rate_multiplier !== 1 ? `, × ${num(v.rate_multiplier, 1)} as when the deal was agreed` : ""}.</p>
+      ${lg.warnings.map(w => `<p class="err">${esc(w)}</p>`).join("")}</div></div>`;
+  h += `<div class="card"><h2>Pickup schedule</h2><div class="ctrl noprint"><label class="field">Date<input id="pkDate" type="date" min="${today}" value="${esc(bk ? bk.date : tomorrow)}" ${dl.status === "agreed" ? "" : "disabled"}></label>
+      <label class="field">Time slot<select id="pkSlot" ${dl.status === "agreed" ? "" : "disabled"}>${lg.slots.map(x => `<option ${bk && bk.slot === x ? "selected" : ""}>${x}</option>`).join("")}</select></label>
+      <button class="btn pri" id="pkBook" type="button" ${dl.status === "agreed" ? "" : "disabled"}>${bk ? "Change booking" : "Book pickup"}</button>
+      <span class="note">${bk ? `Booked: ${esc(bk.date)}, ${esc(bk.slot)}${lg.arrival ? ` · expected at ${esc(lg.buyer.name)} about ${esc(lg.arrival.slice(11, 16))}` : ""}` : "Not booked yet."}</span></div>
+    ${fresh ? `<div class="scroll"><table><tr><th>Lot</th><th>Seller</th><th>Product</th><th class="n">kg</th><th>Storage</th><th class="n">Hours left now</th><th class="n">On arrival if collected now</th><th class="n">On arrival at booked slot</th><th class="n">Buyer needs</th><th></th></tr>${lg.lots.map(x => `<tr><td>${esc(x.resource_id)}</td><td>${esc(x.seller_name)}</td><td>${esc(x.product)}</td><td class="n">${num(x.kg, 1)}</td><td>${x.storage === "ambient" ? "ambient" : `<span class="pill p-warn">${esc(x.storage)}</span>`}</td><td class="n">${num(x.hours_left, 1)} h</td><td class="n">${num(x.on_arrival_if_collected_now, 1)} h</td><td class="n">${x.on_arrival_at_booked_slot == null ? "–" : num(x.on_arrival_at_booked_slot, 1) + " h"}</td><td class="n">${num(x.min_on_arrival)} h</td><td>${x.ok ? '<span class="pill p-ok">OK</span>' : '<span class="pill p-bad">Too late</span>'}</td></tr>`).join("")}</table></div>
+      <p class="note">"If collected now" is the engine's own check: hours left minus the pickup tour. At the booked slot, the hours until the slot are subtracted too. Food rules are platform rules that still need expert review.</p>` : ""}</div>`;
+  h += `<div class="card"><h2>What to collect, in order</h2><div class="scroll"><table><tr><th class="n">Stop</th><th>Seller</th><th>Item</th><th class="n">${fresh ? "kg" : esc(lg.unit_name)}</th><th class="n">Stop total kg</th></tr>${lg.collect.map(c => c.items.map((it, j) => `<tr><td class="n">${j ? "" : "S" + c.stop}</td><td>${j ? "" : esc(c.seller_name)}</td><td class="w"><code>${esc(it.resource_id)}</code> ${esc(it.what)}</td><td class="n">${num(fresh ? it.kg : it.units, fresh ? 1 : 0)}</td><td class="n">${j ? "" : num(c.kg, 1)}</td></tr>`).join("")).join("")}</table></div>
+    <p class="note">Then deliver everything to ${esc(lg.buyer.name)}. The printable pickup sheet has contact lines for the driver to fill in.</p></div>`;
+  el.innerHTML = h;
+  const msg = t => { $("#pkMsg", el).innerHTML = t; };
+  $("#pkDeal", el).onchange = e => { st.lastDeal = +e.target.value; render(); };
+  const book = $("#pkBook", el);
+  if (book) book.onclick = async () => {
+    book.disabled = true;
+    try { await api(`/api/deals/${id}/booking`, {pickup_date: $("#pkDate", el).value, slot: $("#pkSlot", el).value}); st.lastDeal = id; render(); }
+    catch (e) { msg(`<span class="err">${esc(e.message)}</span>`); book.disabled = false; }
+  };
+  const col = $("#pkCollect", el);
+  if (col) col.onclick = async () => {
+    try { await api(`/api/deals/${id}/advance`, {status: "dispatched"}); st.lastDeal = id; render(); } catch (e) { msg(`<span class="err">${esc(e.message)}</span>`); }
+  };
+  const del = $("#pkDeliver", el), ev = $("#pkEv", el), conf = $("#pkConf", el);
+  if (del) {
+    const ready = () => { del.disabled = !(ev.value.trim() && conf.checked); };
+    ev.oninput = ready; conf.onchange = ready;
+    del.onclick = async () => {
+      try { await api(`/api/deals/${id}/advance`, {status: "delivered", evidence: [ev.value.trim()], buyer_confirmed: true}); st.lastDeal = id; render(); }
+      catch (e) { msg(`<span class="err">${esc(e.message)}</span>`); }
+    };
+  }
+}
+const cap1 = s => s ? s[0].toUpperCase() + s.slice(1) : "";
+
 /* ---------------- Admin ---------------- */
 async function vQuality(el) {
   let r;
@@ -562,7 +660,7 @@ async function vSim(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {connect: vConnect, browse: vBrowse, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();

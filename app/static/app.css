@@ -159,6 +159,18 @@ img.ex{max-width:100%;height:auto;border-radius:var(--r-ctl);border:1px solid va
 .lwhy{color:var(--warn)}
 .lsearch input{width:240px}
 
+/* ---------- photo labels and pickup and delivery ---------- */
+.lphoto{position:relative}
+.ptag{position:absolute;left:var(--s1);bottom:var(--s1);max-width:calc(100% - var(--s2));padding:4px var(--s1);border-radius:4px;background:rgba(10,16,21,.82);color:#fff;font-size:11.5px;line-height:1.35;font-weight:500}
+.ptag a{color:#fff}.ptag.seller{background:rgba(29,107,63,.9)}
+.routemap{width:100%;height:auto;display:block;background:var(--bg);border-radius:var(--r-ctl)}
+.routemap .halo{paint-order:stroke;stroke:var(--bg);stroke-width:4px;stroke-linejoin:round}
+.tracker{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--s1);list-style:none;margin:0;padding:0;counter-reset:st}
+.tracker li{counter-increment:st;position:relative;padding-top:28px;font-size:13px;color:var(--mut);border-top:4px solid var(--line)}
+.tracker li::before{content:counter(st);position:absolute;top:6px;left:0;font:600 12px var(--mono)}
+.tracker li.done{border-top-color:var(--ok);color:var(--fg)}.tracker li.cur{border-top-color:var(--acc);font-weight:600}
+input[type=date]{font-family:var(--mono)}
+
 /* ---------- motion ---------- */
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}.btn:active{transform:none}}
 

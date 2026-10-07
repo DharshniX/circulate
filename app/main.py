@@ -15,7 +15,7 @@ import json
 import re
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -48,6 +48,10 @@ def db():
         demand_id TEXT, buyer_name TEXT, sellers TEXT, units REAL, unit_name TEXT, kg_in_units REAL,
         kg_shipped REAL, route_km REAL, value_above_salvage REAL, buyer_utilisation REAL,
         status TEXT, is_simulated INTEGER, evidence TEXT, buyer_confirmed INTEGER, history TEXT)""")
+    have = {r[1] for r in con.execute("PRAGMA table_info(deals)")}
+    for col, typ in (("scenario", "TEXT"), ("rate_multiplier", "REAL"), ("booking", "TEXT")):
+        if col not in have:  # older databases: add the column, keep every row
+            con.execute(f"ALTER TABLE deals ADD COLUMN {col} {typ}")
     con.execute("""CREATE TABLE IF NOT EXISTS imported_stock (
         lane TEXT, item_id TEXT, item TEXT, rules TEXT, label TEXT, listed_at TEXT, PRIMARY KEY (lane, item_id))""")
     return con
@@ -93,6 +97,8 @@ class NewDeal(BaseModel):
     value_above_salvage: float
     buyer_utilisation: float | None = None
     is_simulated: bool = True
+    scenario: str | None = None
+    rate_multiplier: float = Field(1.0, gt=0, le=20)
 
 
 class Advance(BaseModel):
@@ -197,10 +203,10 @@ def create_deal(d: NewDeal):
         cur = con.execute(
             "INSERT INTO deals (created_at, kind, counterfactual, demand_id, buyer_name, sellers, units, unit_name,"
             " kg_in_units, kg_shipped, route_km, value_above_salvage, buyer_utilisation, status, is_simulated,"
-            " evidence, buyer_confirmed, history) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " evidence, buyer_confirmed, history, scenario, rate_multiplier) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (now, d.kind, d.counterfactual, d.demand_id, d.buyer_name, json.dumps(d.sellers), d.units, d.unit_name,
              d.kg_in_units, d.kg_shipped, d.route_km, d.value_above_salvage, d.buyer_utilisation, "agreed",
-             int(d.is_simulated), "[]", 0, json.dumps([{"at": now, "status": "agreed"}])))
+             int(d.is_simulated), "[]", 0, json.dumps([{"at": now, "status": "agreed"}]), d.scenario, d.rate_multiplier))
         return {"id": cur.lastrowid, "status": "agreed"}
 
 
@@ -385,9 +391,9 @@ def _photo_card(key: str, rid: str, item: dict) -> str:
     api = json.dumps(f"/api/photo/{key}/{rid}").replace("</", "<\\/")
     what = "lot" if item["kind"] == "perishable" else "piece"
     remove = '<button type="button" id="pdel">Remove photo</button>' if url else ""
-    return (f'<div class="card"><b>Photo</b>{shown}<div class="noprint"><form id="pf"><input type="file" id="pfile" accept="image/jpeg,image/png,image/webp" aria-label="Photo file">'
+    return (f'<div class="card"><b>Photo</b>{shown}<div class="noprint"><form id="pf"><input type="file" id="pfile" accept="image/*" capture="environment" aria-label="Take or choose a photo">'
             f'<button type="submit">{"Replace photo" if url else "Upload photo"}</button>{remove}</form>'
-            f'<p class="note" id="pmsg" aria-live="polite">Seller only: a photo of this exact {what}. JPEG, PNG or WebP, up to 5 MB.</p></div></div>'
+            f'<p class="note" id="pmsg" aria-live="polite">Seller only: a photo of this exact {what}. On a phone this opens the camera. JPEG, PNG or WebP, up to 5 MB.</p></div></div>'
             f'<script>const PURL={api},msg=t=>document.getElementById("pmsg").textContent=t;'
             'document.getElementById("pf").onsubmit=async ev=>{ev.preventDefault();const f=document.getElementById("pfile").files[0];'
             'if(!f){msg("Choose a photo first.");return}msg("Uploading...");'
@@ -598,6 +604,30 @@ def delete_photo(key: str, rid: str):
     return {"removed": bool(f)}
 
 
+ILLUSTRATIVE = ROOT / "static" / "illustrative" / "credits.json"
+FOOD_WORDS = (("tomato", "tomatoes"), ("onion", "onions"), ("bread", "bread"), ("paneer", "paneer"), ("rice", "cooked_rice"),
+              ("biryani", "cooked_rice"))
+FOOD_CATEGORY = {"vegetables": "vegetables", "bakery": "bread", "dairy": "paneer"}
+SHEET_MATERIAL = {"mild_steel": "mild_steel", "aluminium": "aluminium", "plywood": "plywood"}
+
+
+def _illustrative(item: dict) -> dict | None:
+    """A freely licensed photo of the same kind of thing, never of the item itself. None if nothing matches."""
+    if item.get("photo") or not ILLUSTRATIVE.exists():
+        return None  # a seller's own photo always wins
+    credits = json.loads(ILLUSTRATIVE.read_text(encoding="utf-8"))
+    if item["kind"] == "flat":
+        key = SHEET_MATERIAL.get(item["material"])
+    elif item["kind"] == "linear":
+        key = "steel_bars_pipes" if item["material"] == "mild_steel" else None
+    else:
+        name = item["product"].lower()
+        key = next((k for w, k in FOOD_WORDS if w in name), None) or FOOD_CATEGORY.get(item["category"])
+    c = credits.get(key) if key else None
+    return None if c is None else {"url": c["file"], "shows": c["shows"], "title": c["title"], "author": c["author"],
+                                   "licence": c["licence"], "licence_url": c["licence_url"], "source_url": c["source_url"]}
+
+
 def _browse_scenario(key: str) -> tuple[list[dict], str]:
     d = SC.dataset(key)
     cfg, sellers, demands = d["settings"], {s.id: s for s in d["sellers"]}, d["demands"]
@@ -668,4 +698,181 @@ def browse(lane: Literal["durable", "fresh"]):
         if (sc["engine"] == "perishable") == (lane == "fresh"):
             rows, buyers[key] = _browse_scenario(key)
             items += rows
-    return {"lane": lane, "items": items + _browse_imported(lane), "distance_from": buyers}
+    items += _browse_imported(lane)
+    for it in items:
+        it["illustrative"] = _illustrative(it)
+    return {"lane": lane, "items": items, "distance_from": buyers}
+
+
+# ---------------- Pickup and delivery (transporters and bookings are simulated) ----------------
+SLOTS = ["08:00-10:00", "10:00-12:00", "12:00-14:00", "14:00-16:00", "16:00-18:00", "18:00-20:00"]
+SIMULATED = "Transporters and bookings are simulated in this prototype."
+
+
+class Booking(BaseModel):
+    pickup_date: date
+    slot: Literal["08:00-10:00", "10:00-12:00", "12:00-14:00", "14:00-16:00", "16:00-18:00", "18:00-20:00"]
+
+
+def _deal_row(deal_id: int):
+    with closing(db()) as con:
+        row = con.execute("SELECT * FROM deals WHERE id=?", (deal_id,)).fetchone()
+    if row is None:
+        raise HTTPException(404, "deal not found")
+    return row
+
+
+def _slot_start(b: dict) -> datetime:
+    return datetime.fromisoformat(f"{b['date']}T{b['slot'][:5]}")
+
+
+def _logistics(row, now: datetime | None = None) -> dict:
+    """Re-run the engine on exactly the deal's sellers: same pickup order, vehicle and transport cost as when it was agreed."""
+    key = row["scenario"] if row["scenario"] in SC.SCENARIOS else next(
+        (k for k in SC.SCENARIOS if any(d.id == row["demand_id"] for d in SC.dataset(k)["demands"])), None)
+    if key is None:
+        raise HTTPException(422, f"deal {row['id']} refers to order {row['demand_id']}, which is in no scenario")
+    d = SC.dataset(key)
+    demand = next(x for x in d["demands"] if x.id == row["demand_id"])
+    used = json.loads(row["sellers"])
+    sellers = [x for x in d["sellers"] if x.id in used]
+    res = [r for r in d["resources"] if r.seller_id in used]
+    transport = d["transport"].model_copy(update={"rate_multiplier": row["rate_multiplier"] or 1.0})
+    f = fulfil(demand, sellers, res, transport, d["settings"], 0.5, True)
+    b = f["best"]
+    if b is None:
+        raise HTTPException(422, f"the engine can no longer build this pickup: {f['message']}")
+    by_id = {x.id: x for x in d["sellers"]}
+    res_by_id = {r.id: r for r in res}
+    depot = (demand.x_km, demand.y_km)
+    stops = [("buyer", demand.buyer_name, depot)] + [(sid, by_id[sid].name, (by_id[sid].x_km, by_id[sid].y_km)) for sid in b["pickup_order"]]
+    legs = []
+    for i, (a, z) in enumerate(zip(stops, stops[1:] + stops[:1]), start=1):
+        legs.append({"n": i, "from": a[1], "to": z[1], "km": round(_dist(a[2], z[2]), 2)})
+    per = {x["seller_id"]: x for x in b["per_seller"]}
+    collect = []
+    for n, sid in enumerate(b["pickup_order"], start=1):
+        items = []
+        for a in b["allocations"]:
+            if a["seller_id"] != sid:
+                continue
+            r = res_by_id[a["resource_id"]]
+            it = {"resource_id": r.id, "what": _describe(r), "units": a["units"]}
+            if r.kind == "perishable":
+                it.update(product=r.product, kg=a["taken_kg"], storage=r.storage, hours_left=r.hours_left)
+            items.append(it)
+        collect.append({"stop": n, "seller_id": sid, "seller_name": by_id[sid].name, "x_km": by_id[sid].x_km,
+                        "y_km": by_id[sid].y_km, "kg": per[sid]["kg_shipped"], "units": per[sid]["units"], "items": items})
+    vehicle = next((v for v in transport.vehicles if v.name == b["vehicle"]), None)
+    booking = json.loads(row["booking"]) if row["booking"] else None
+    out = {"deal": {"id": row["id"], "status": row["status"], "buyer_name": row["buyer_name"], "kind": row["kind"],
+                    "is_simulated": bool(row["is_simulated"]), "evidence": json.loads(row["evidence"]),
+                    "buyer_confirmed": bool(row["buyer_confirmed"]), "history": json.loads(row["history"])},
+           "scenario": key, "unit_name": f["unit_name"], "part_name": getattr(demand, "part_name", ""),
+           "buyer": {"name": demand.buyer_name, "x_km": demand.x_km, "y_km": demand.y_km},
+           "pickup_order": b["pickup_order"], "legs": legs, "route_km": b["route_km"], "tour_hours": b["tour_hours"],
+           "speed_kmph": transport.speed_kmph, "collect": collect,
+           "vehicle": {"name": b["vehicle"], "payload_kg": vehicle.payload_kg if vehicle else None, "trips": b["trips"],
+                       "load_kg": b["kg_shipped"], "transport_cost": b["value"]["transport_T"],
+                       "rate_multiplier": transport.rate_multiplier, "label": transport.label},
+           "matches_deal": sorted(b["sellers_used"]) == sorted(used), "booking": booking, "slots": SLOTS,
+           "note": SIMULATED, "warnings": []}
+    if row["kind"] == "perishable":
+        now = now or datetime.now()
+        wait = max(0.0, (_slot_start(booking) - now).total_seconds() / 3600) if booking else None
+        if booking:
+            out["arrival"] = (_slot_start(booking) + timedelta(hours=b["tour_hours"])).isoformat(timespec="minutes")
+        lots, cold = [], []
+        for c in collect:
+            for it in c["items"]:
+                now_left = round(it["hours_left"] - b["tour_hours"], 2)  # the engine's own arrival rule
+                at_slot = None if wait is None else round(it["hours_left"] - wait - b["tour_hours"], 2)
+                lots.append({**it, "seller_name": c["seller_name"], "on_arrival_if_collected_now": now_left,
+                             "on_arrival_at_booked_slot": at_slot, "min_on_arrival": demand.min_hours_left_on_arrival,
+                             "ok": (at_slot if at_slot is not None else now_left) >= demand.min_hours_left_on_arrival})
+                if it["storage"] in ("chilled", "frozen"):
+                    cold.append(f"{it['product']} ({it['storage']})")
+        out["lots"] = lots
+        if cold:
+            out["warnings"].append(f"Needs a chilled vehicle or insulated boxes: {', '.join(cold)}. "
+                                   f"The {b['vehicle']} in this prototype has no cold chain.")
+        late = [x["product"] for x in lots if not x["ok"]]
+        if late:
+            out["warnings"].append(f"Would arrive with less than the buyer's {demand.min_hours_left_on_arrival:g} h of shelf life: "
+                                   f"{', '.join(late)}. Book an earlier slot.")
+    if not out["matches_deal"]:
+        out["warnings"].append("The engine now picks different sellers for this order than the deal recorded; check before booking.")
+    return out
+
+
+@app.get("/api/deals/{deal_id}/logistics")
+def deal_logistics(deal_id: int, now: datetime | None = None):
+    """Map, vehicle, schedule and collection list for one deal. `now` is only for testing the clock."""
+    return _logistics(_deal_row(deal_id), now)
+
+
+@app.post("/api/deals/{deal_id}/booking")
+def book_pickup(deal_id: int, bk: Booking):
+    row = _deal_row(deal_id)
+    if row["status"] != "agreed":
+        raise HTTPException(409, f"the goods are already {row['status']}; a pickup can only be booked before collection")
+    if bk.pickup_date < datetime.now().date():
+        raise HTTPException(422, "pick today or a later date")
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with closing(db()) as con, con:
+        con.execute("UPDATE deals SET booking=?, history=? WHERE id=?",
+                    (json.dumps({"date": bk.pickup_date.isoformat(), "slot": bk.slot, "booked_at": now}),
+                     json.dumps(json.loads(row["history"]) + [{"at": now, "status": "pickup booked", "slot": f"{bk.pickup_date} {bk.slot}"}]),
+                     deal_id))
+    return _logistics(_deal_row(deal_id))
+
+
+def _doc(title: str, body: str) -> str:
+    return _PAGE.format(title=title, body=body).replace("max-width:520px", "max-width:820px").replace("</style>", "table{width:100%;border-collapse:collapse} th,td{text-align:left;padding:6px 8px;"
+        "border-bottom:1px solid #d9dfe4;vertical-align:top} th{font-size:12px;text-transform:uppercase;color:#5d6b77} .sig{display:flex;gap:24px;"
+        "flex-wrap:wrap;margin-top:12px} .sig div{flex:1;min-width:200px;border-top:1px solid #17222b;padding-top:4px;margin-top:36px;font-size:13px}"
+        " .warn{background:#fff2dc;color:#8a4b00;border-radius:6px;padding:8px 12px}</style>")
+
+
+def _qty(it, lg):
+    return f"{it['kg']:g} kg" if "kg" in it else f"{it['units']:g} {lg['part_name']}"
+
+
+@app.get("/deals/{deal_id}/pickup-sheet", response_class=HTMLResponse)
+def pickup_sheet(deal_id: int):
+    lg, e = _logistics(_deal_row(deal_id)), _html.escape
+    v, bk = lg["vehicle"], lg["booking"]
+    when = f"{bk['date']}, {bk['slot']}" if bk else "Not booked yet"
+    rows = ""
+    for c in lg["collect"]:
+        items = "".join(f"<li><code>{e(i['resource_id'])}</code> {e(i['what'])}: {e(_qty(i, lg))}</li>" for i in c["items"])
+        rows += (f"<tr><td><b>{c['stop']}</b></td><td><b>{e(c['seller_name'])}</b><br>Contact: ______________<br>Phone: ______________"
+                 f"</td><td><ul style=\"margin:0;padding-left:18px\">{items}</ul>Total {c['kg']:g} kg</td><td>Seller sign:<br><br>______</td></tr>")
+    warn = "".join(f'<p class="warn">{e(w)}</p>' for w in lg["warnings"])
+    body = (f'<div class="card"><h1>Pickup sheet: deal #{lg["deal"]["id"]}</h1><p><span class="chip">simulated</span> {e(SIMULATED)}</p>'
+            f'<dl><dt>Pickup slot</dt><dd>{e(when)}</dd><dt>Vehicle</dt><dd>{e(str(v["name"]))} x {v["trips"]} {"trip" if v["trips"] == 1 else "trips"}, payload {v["payload_kg"]:g} kg, load {v["load_kg"]:g} kg</dd>'
+            f'<dt>Route</dt><dd>{lg["route_km"]:g} km round trip, about {lg["tour_hours"] * 60:.0f} min at {lg["speed_kmph"]:g} km/h (sample)</dd>'
+            f'<dt>Vehicle no.</dt><dd>______________</dd><dt>Driver</dt><dd>______________ Phone ______________</dd></dl>{warn}</div>'
+            f'<div class="card"><h2 style="margin:0 0 8px">Collect, in this order</h2><table><tr><th>Stop</th><th>Seller</th><th>What to collect</th><th></th></tr>{rows}'
+            f'<tr><td><b>{len(lg["collect"]) + 1}</b></td><td><b>Deliver to {e(lg["buyer"]["name"])}</b><br>Contact: ______________</td>'
+            f'<td>All of the above, {v["load_kg"]:g} kg</td><td>Buyer sign:<br><br>______</td></tr></table>'
+            f'<p class="note">Positions are on a simple km grid from sample data; follow the real addresses. Contacts are left blank to fill in.</p></div>')
+    return _doc(f"Pickup sheet {deal_id}", body)
+
+
+@app.get("/deals/{deal_id}/challan", response_class=HTMLResponse)
+def delivery_challan(deal_id: int):
+    lg, e = _logistics(_deal_row(deal_id)), _html.escape
+    bk, v = lg["booking"], lg["vehicle"]
+    lines = "".join(f"<tr><td>{n}</td><td>{e(c['seller_name'])}</td><td><code>{e(i['resource_id'])}</code> {e(i['what'])}</td><td>{e(_qty(i, lg))}</td></tr>"
+                    for n, (c, i) in enumerate(((c, i) for c in lg["collect"] for i in c["items"]), start=1))
+    body = (f'<div class="card"><h1>Delivery challan (simulated)</h1><p><span class="chip">simulated</span> {e(SIMULATED)} Not a tax invoice.</p>'
+            f'<dl><dt>Challan no.</dt><dd>SIM-{lg["deal"]["id"]:05d}</dd><dt>Deal</dt><dd>#{lg["deal"]["id"]}</dd>'
+            f'<dt>Date</dt><dd>{e(bk["date"]) if bk else "______________"}</dd>'
+            f'<dt>From</dt><dd>{e(", ".join(c["seller_name"] for c in lg["collect"]))}</dd><dt>To</dt><dd>{e(lg["buyer"]["name"])}</dd>'
+            f'<dt>Vehicle</dt><dd>{e(str(v["name"]))}, no. ______________</dd></dl></div>'
+            f'<div class="card"><table><tr><th>#</th><th>From</th><th>Item</th><th>Quantity</th></tr>{lines}'
+            f'<tr><td></td><td></td><td><b>Total weight</b></td><td><b>{v["load_kg"]:g} kg</b></td></tr></table>'
+            f'<div class="sig"><div>Delivered by (driver)</div><div>Received in good condition by (buyer)</div></div>'
+            f'<p class="note">Attach this signed challan as delivery evidence. The deal is marked delivered only with evidence and the buyer\'s confirmation.</p></div>')
+    return _doc(f"Challan {deal_id}", body)
