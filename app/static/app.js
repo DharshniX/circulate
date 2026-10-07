@@ -21,12 +21,13 @@ async function api(path, body) {
 const LANES = {durable: {name: "Durable", cls: "np", scen: ["steel", "sheets", "bars"]}, fresh: {name: "Fresh", cls: "pe", scen: ["food"]}};
 const ROLES = {buyer: "Buyer", seller: "Seller", admin: "Admin"};
 const NAV = {
-  buyer: [["match", "Order and match"], ["deals", "My deals"]],
+  buyer: [["browse", "Browse surplus"], ["match", "Order and match"], ["deals", "My deals"]],
   seller: [["connect", "Connect your system"], ["gapfill", "Sold before it's cut", "durable"], ["offers", "Offers and recovery plan"], ["stock", "Stock and passports"]],
   admin: [["monitor", "Deal monitor"], ["quality", "Data quality"], ["prices", "Price references"], ["rules", "Rules"], ["sim", "Simulation lab"]],
 };
 const TITLES = {
   connect: ["Connect your system", "Import from ERP or POS export (CSV). Upload the stock file your system exports; the engine checks every row and finds the surplus."],
+  browse: ["Browse surplus", "Every piece and lot on offer, drawn to scale, with its seller, distance and price range."],
   match: ["Order and match", "Say what you need. The engine checks every seller's stock, nests the parts and finds the cheapest pickup."],
   deals: ["My deals", "Track each order from agreed to dispatched to delivered."],
   gapfill: ["Sold before it's cut", "Fill the empty space in your cutting plan with parts your neighbours have already ordered."],
@@ -40,7 +41,7 @@ const TITLES = {
 };
 const st = {lane: "durable", role: "seller", view: "gapfill", scen: {durable: "steel", fresh: "food"}, ord: {}, rate: {}, off: {},
   plan: {rejected: [], elapsed: 0, key: null}, deadline: {}, gf: null, gfDeclined: [], sellerFilter: "", lastDeal: null,
-  imp: {durable: {}, fresh: {}}, impLimit: {days: 30, hours: 24}, impMeasured: false,
+  imp: {durable: {}, fresh: {}}, br: {durable: {q: "", mat: "", thick: "", seller: "", sort: "distance"}, fresh: {q: "", mat: "", thick: "", seller: "", sort: "hours"}}, impLimit: {days: 30, hours: 24}, impMeasured: false,
   job: {sheet_length_mm: 2500, sheet_width_mm: 1250, thickness_mm: 6, grade: "E250", part_name: "base plate", part_length_mm: 450, part_width_mm: 350, quantity: 9}};
 
 function navFor(role, lane) { return NAV[role].filter(n => !n[2] || n[2] === lane); }
@@ -63,7 +64,7 @@ function shell() {
   $("#role").innerHTML = Object.entries(ROLES).map(([k, v]) => `<button type="button" data-role="${k}" aria-pressed="${k === st.role}">${v}</button>`).join("");
   $("#nav").innerHTML = `<h6>${ROLES[st.role]} · ${LANES[st.lane].name}</h6>` + navFor(st.role, st.lane).map(([k, t]) =>
     `<button type="button" data-view="${k}" ${k === st.view ? 'aria-current="page"' : ""}>${esc(t)}</button>`).join("") +
-    (st.role === "seller" && st.lane === "fresh" ? `<p class="note" style="padding:8px 12px;color:var(--railfg)">Sold before it's cut applies to sheet cutting, so it lives in the Durable lane.</p>` : "");
+    (st.role === "seller" && st.lane === "fresh" ? `<p class="railnote">Sold before it's cut applies to sheet cutting, so it lives in the Durable lane.</p>` : "");
 }
 document.addEventListener("click", e => {
   const b = e.target.closest("[data-lane],[data-role],[data-view]");
@@ -116,6 +117,105 @@ function sheetSvg(a) {
 }
 const errBox = e => `<div class="err" role="alert">${esc(e.message || e)}</div>`;
 
+/* ---------------- Buyer: browse surplus (marketplace listings) ---------------- */
+const cap = s => s ? s[0].toUpperCase() + s.slice(1) : "";
+const labelChip = l => l === "measured" ? chip("measured") : chip(l || "sample");
+function pieceSvg(it) {
+  if (it.kind === "linear") {
+    const R = Math.max(6000, it.length_mm);
+    return `<svg viewBox="-40 -40 ${R + 80} 680" role="img" aria-label="${num(it.length_mm)} mm bar drawn to scale against a 6 m length" preserveAspectRatio="xMidYMid meet">
+      <rect x="0" y="230" width="${R}" height="140" rx="20" style="fill:none;stroke:var(--mut);stroke-width:8;stroke-dasharray:40 30"/>
+      <rect x="0" y="230" width="${it.length_mm}" height="140" rx="20" style="fill:var(--piece);stroke:var(--np);stroke-width:12"/></svg>`;
+  }
+  const RL = Math.max(2500, it.length_mm), RW = Math.max(1250, it.width_mm), sw = RL / 300;
+  return `<svg viewBox="${-sw * 4} ${-sw * 4} ${RL + sw * 8} ${RW + sw * 8}" role="img" aria-label="${num(it.length_mm)} by ${num(it.width_mm)} mm piece drawn to scale against a 2500 by 1250 mm sheet${(it.defects || []).length ? ", defects in red" : ""}" preserveAspectRatio="xMidYMid meet">
+    <rect x="0" y="0" width="${RL}" height="${RW}" style="fill:none;stroke:var(--mut);stroke-width:${sw};stroke-dasharray:${sw * 5} ${sw * 4}"/>
+    <rect x="0" y="0" width="${it.length_mm}" height="${it.width_mm}" style="fill:var(--piece);stroke:var(--np);stroke-width:${sw * 1.6}"/>
+    ${(it.defects || []).map(d => `<rect x="${d.x_mm}" y="${d.y_mm}" width="${d.length_mm}" height="${d.width_mm}" style="fill:var(--bad);opacity:.55"><title>${esc(d.note || "defect")}</title></rect>`).join("")}</svg>`;
+}
+function priceSrc(o, what) {
+  return `${what} ₹${num(Math.abs(o.price_per_kg), 1)}/kg · ${esc(cap(o.label))} · ${o.quoted_on ? "quoted " + esc(o.quoted_on) : "no date"}`;
+}
+function listingCard(it, lane) {
+  const durable = lane === "durable", flat = it.kind === "flat";
+  let title, spec, media, price;
+  if (it.kind === "perishable") {
+    const h = it.hours_left, urgent = h < 12;
+    title = esc(it.product);
+    spec = `${num(it.quantity_kg, 1)} kg · ${esc(it.storage)} · ${esc(it.category.replace(/_/g, " "))}`;
+    media = `<div class="lclock"><div class="ctrl"><span class="lbl">Use-by</span><div class="grow"></div><b class="${urgent ? "bad" : ""}">${num(h, h % 1 ? 1 : 0)} h left</b></div>
+      <div class="bar ${urgent ? "bad" : "pe"}" role="img" aria-label="${num(h)} hours left of a 72 hour scale"><i style="width:${Math.max(3, Math.min(1, h / 72) * 100)}%"></i></div>
+      <span class="note">${urgent ? "Under 12 hours: collect today." : "Scale: 72 hours."}</span></div>`;
+    price = it.disposal ? `<div class="lprice"><b>${inr(-it.disposal.value)}</b><span>Disposal cost the seller avoids</span></div><p class="note">${priceSrc(it.disposal, "Disposal")}</p>`
+      : `<div class="lprice"><b>–</b><span>No disposal cost entered yet</span></div>`;
+  } else {
+    title = flat ? `${num(it.length_mm)} × ${num(it.width_mm)} mm` : `${esc(it.profile)}, ${num(it.length_mm)} mm`;
+    spec = flat ? `${num(it.thickness_mm, it.thickness_mm % 1 ? 1 : 0)} mm ${esc(it.material_name)} · ${esc(it.grade)} · ${esc(it.condition.replace(/_/g, " "))} · ${it.is_full_sheet ? "full sheet" : "offcut"}`
+      : `${esc(it.material_name)} · ${esc(it.grade)} · ${esc(it.condition.replace(/_/g, " "))}`;
+    media = `<div class="lsvg">${pieceSvg(it)}</div><span class="note lcap">To scale against a ${flat ? "2,500 × 1,250 mm sheet" : "6 m length"} (dashed)${(it.defects || []).length ? "; red = defect" : ""}</span>`;
+    if (it.floor) {
+      const c = it.ceiling;
+      price = `<div class="lprice"><b>${inr(it.floor.value)}${c ? ` – ${inr(c.value)}` : ""}</b><span>Price range for the whole ${flat ? "piece" : "length"}</span></div>
+        <p class="note">Floor: scrap value, ${priceSrc(it.floor, "scrap")}.<br>${c ? `Ceiling: same ${flat ? "steel from new sheet" : "material from new stock"} at the buyer's new price ₹${num(c.price_per_kg, 1)}/kg · ${esc(cap(c.label))}.` : "No ceiling: no buyer in this cluster has a new price for this material."}</p>`;
+    } else price = `<div class="lprice"><b>–</b><span>No price yet</span></div><p class="note">Imported stock has no scrap quote yet. A dated quote is needed before a price is shown.</p>`;
+  }
+  const photo = it.photo ? `<figure class="lphoto"><img src="${esc(it.photo)}" alt="Photo of ${esc(it.id)} uploaded by the seller" loading="lazy"><figcaption class="note">Photo uploaded by the seller</figcaption></figure>` : "";
+  const dist = it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km`;
+  const uid = `${it.key}:${it.id}`;
+  return `<article class="lcard ${durable ? "np" : "pe"}" aria-label="${esc(it.id)}">${photo}<div class="lmedia">${media}</div>
+    <div class="lbody"><div class="ltop"><h3>${title}</h3>${labelChip(it.label)}</div><p class="mut">${spec}</p>
+      <dl class="lfacts"><dt>Seller</dt><dd>${esc(it.seller_name)}</dd><dt>Distance</dt><dd>${dist}</dd><dt>Weight</dt><dd>${num(it.kg, 1)} kg</dd><dt>Item</dt><dd><code>${esc(it.id)}</code></dd></dl>
+      ${price}
+      ${it.rules ? `<p class="note">Imported from a CSV export. Found as surplus: ${it.rules.map(esc).join("; ")}.</p>` : ""}
+      <div class="lact"><button class="btn pri sm" type="button" data-order="${esc(uid)}" ${it.order ? "" : "disabled"}>Order parts from this</button><a class="btn sm" href="${esc(it.passport)}" target="_blank" rel="noopener">Passport</a></div>
+      ${it.order ? `<p class="note">Opens ${esc(it.order.buyer_name)}'s order with only ${esc(it.seller_name)} ticked.</p>` : `<p class="note lwhy">Cannot order yet: ${esc(it.order_reason)}</p>`}</div></article>`;
+}
+async function vBrowse(el) {
+  const lane = st.lane, F = st.br[lane], durable = lane === "durable";
+  const r = await api(`/api/browse/${lane}`);
+  const items = r.items, byUid = Object.fromEntries(items.map(it => [`${it.key}:${it.id}`, it]));
+  const matOf = it => durable ? it.material_name : it.category.replace(/_/g, " ");
+  const uniq = xs => [...new Set(xs)].sort((a, b) => typeof a === "number" ? a - b : String(a).localeCompare(String(b)));
+  const mats = uniq(items.map(matOf)), thicks = uniq(items.filter(it => it.kind === "flat").map(it => it.thickness_mm)), sellers = uniq(items.map(it => it.seller_name));
+  const sorts = durable ? [["distance", "Distance, nearest first"], ["size", "Size, largest first"]] : [["hours", "Hours left, soonest first"], ["distance", "Distance, nearest first"]];
+  const sel = (id, label, cur, opts, all) => `<label class="field">${label}<select id="${id}"><option value="">${all}</option>${opts.map(o => `<option value="${esc(o)}" ${String(o) === String(cur) ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>`;
+  el.innerHTML = `<div class="card noprint"><div class="ctrl"><label class="field lsearch">Search<input id="brQ" type="search" placeholder="Item, seller, grade, product" value="${esc(F.q)}"></label>
+      ${sel("brMat", durable ? "Material" : "Category", F.mat, mats, durable ? "All materials" : "All categories")}
+      ${durable ? sel("brThick", "Thickness mm", F.thick, thicks, "Any thickness") : ""}
+      ${sel("brSeller", "Seller", F.seller, sellers, "All sellers")}
+      <label class="field">Sort by<select id="brSort">${sorts.map(([k, t]) => `<option value="${k}" ${k === F.sort ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+      <div class="grow"></div><button class="btn" id="brClear" type="button">Clear filters</button></div>
+    <p class="note">Distances are straight-line km from the buyer of the first open order in each sample cluster (${Object.entries(r.distance_from).map(([k, b]) => esc(b)).join(", ")}). Prices and positions are sample data.${durable ? "" : " Food rules are platform rules that still need expert review."}</p></div>
+    <div class="ctrl"><span id="brCount" class="mut" aria-live="polite"></span></div><div id="brGrid" class="lgrid"></div>`;
+  const grid = $("#brGrid", el), count = $("#brCount", el);
+  function paint() {
+    const q = F.q.trim().toLowerCase();
+    let xs = items.filter(it => (!F.mat || matOf(it) === F.mat) && (!F.thick || (it.kind === "flat" && String(it.thickness_mm) === String(F.thick))) && (!F.seller || it.seller_name === F.seller)
+      && (!q || [it.id, it.seller_name, it.grade, it.product, it.material_name, it.profile, it.category, it.condition].some(v => v && String(v).toLowerCase().includes(q))));
+    const far = v => v == null ? Infinity : v;
+    if (F.sort === "distance") xs.sort((a, b) => far(a.distance_km) - far(b.distance_km));
+    else if (F.sort === "size") xs.sort((a, b) => (b.length_mm * (b.width_mm || 1)) - (a.length_mm * (a.width_mm || 1)));
+    else xs.sort((a, b) => a.hours_left - b.hours_left);
+    count.textContent = `Showing ${xs.length} of ${items.length} ${durable ? "pieces" : "lots"}`;
+    grid.innerHTML = !items.length ? `<div class="empty">Nothing is on offer in this lane yet. Sellers add stock under Connect your system.</div>`
+      : xs.length ? xs.map(it => listingCard(it, lane)).join("") : `<div class="empty">No ${durable ? "pieces" : "lots"} match these filters. <button class="btn sm" type="button" id="brClear2">Clear filters</button></div>`;
+    const c2 = $("#brClear2", grid); if (c2) c2.onclick = clear;
+  }
+  function clear() { Object.assign(F, {q: "", mat: "", thick: "", seller: ""}); render(); }
+  $("#brQ", el).oninput = e => { F.q = e.target.value; paint(); };
+  for (const [id, k] of [["brMat", "mat"], ["brThick", "thick"], ["brSeller", "seller"], ["brSort", "sort"]]) { const s = $("#" + id, el); if (s) s.onchange = () => { F[k] = s.value; paint(); }; }
+  $("#brClear", el).onclick = clear;
+  grid.addEventListener("click", async e => {
+    const b = e.target.closest("[data-order]");
+    if (!b) return;
+    const it = byUid[b.dataset.order], k = it.order.scenario, S = await scen(k);
+    st.scen[lane] = k; st.ord[k] = it.order.index;
+    st.off[k] = new Set(S.data.sellers.map(x => x.id).filter(id => id !== it.seller_id));
+    go({view: "match"});
+  });
+  paint();
+}
+
 /* ---------------- Buyer: order and match ---------------- */
 async function vMatch(el) {
   const k = laneScen(), S = await scen(k), fresh = S.meta.engine === "perishable";
@@ -131,7 +231,7 @@ async function vMatch(el) {
   const ctrl = `<div class="card noprint"><div class="ctrl">${await scenSeg()}
     <label class="field">Order<select id="ordSel">${S.data.demands.map((x, j) => `<option value="${j}" ${j === i ? "selected" : ""}>${esc(x.buyer_name)}: ${num(x.quantity, fresh ? 1 : 0)} ${esc(x.part_name)}</option>`).join("")}</select></label>
     <label class="field">Transport rate ×<input id="rate" type="number" min="0.2" max="5" step="0.1" value="${rate}"></label></div>
-    <div class="ctrl"><span class="lbl">Sellers in the cluster</span>${S.data.sellers.map(s => `<label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" data-seller="${esc(s.id)}" ${off.has(s.id) ? "" : "checked"}>${esc(s.name)}</label>`).join("")}</div></div>`;
+    <div class="ctrl"><span class="lbl">Sellers in the cluster</span>${S.data.sellers.map(s => `<label class="check"><input type="checkbox" data-seller="${esc(s.id)}" ${off.has(s.id) ? "" : "checked"}>${esc(s.name)}</label>`).join("")}</div></div>`;
   if (err) { el.innerHTML = ctrl + errBox(err); bind(); return; }
   const b = f.best;
   let h = ctrl;
@@ -191,7 +291,7 @@ async function vDeals(el, admin) {
   const step = s => ({agreed: 1, dispatched: 2, delivered: 3})[s];
   let h = tiles + `<div class="card"><div class="ctrl"><h2>${admin ? "All deals" : "Your deals"}</h2><div class="grow"></div><button class="btn sm" id="resetDeals" type="button">Clear demo deals</button></div><div class="scroll"><table><tr><th>Deal</th><th>Buyer</th><th>Sellers</th><th>Lane</th><th>Stage</th><th>Data</th><th>Next step</th></tr>${ds.map(x => `<tr ${x.id === st.lastDeal ? 'class="sel"' : ""}><td>#${x.id}</td><td>${esc(x.buyer_name)}</td><td>${x.sellers.map(esc).join(", ")}</td><td>${x.kind === "perishable" ? "Fresh" : "Durable"}</td><td><span class="pill ${x.status === "delivered" ? "p-ok" : "p-mut"}">${step(x.status)}/3 ${esc(x.status)}</span></td><td>${chip(x.is_simulated ? "simulated" : "verified")}</td><td>${
     x.status === "agreed" ? `<button class="btn sm" data-dispatch="${x.id}" type="button">Seller marks dispatched</button>` :
-    x.status === "dispatched" ? `<span class="ctrl"><input aria-label="Delivery evidence" placeholder="Challan no., e.g. DC-104" data-ev="${x.id}" style="width:170px"><label class="note"><input type="checkbox" data-conf="${x.id}"> buyer confirms</label><button class="btn sm" data-deliver="${x.id}" type="button">Mark delivered</button></span>` : "Done"}</td></tr>`).join("")}</table></div><p id="dealMsg" class="note" aria-live="polite">A simulated deal stays simulated even after delivery evidence is added.</p></div>`;
+    x.status === "dispatched" ? `<span class="ctrl"><input aria-label="Delivery evidence" placeholder="Challan no., e.g. DC-104" data-ev="${x.id}" style="width:170px"><label class="check note"><input type="checkbox" data-conf="${x.id}"> buyer confirms</label><button class="btn sm" data-deliver="${x.id}" type="button">Mark delivered</button></span>` : "Done"}</td></tr>`).join("")}</table></div><p id="dealMsg" class="note" aria-live="polite">A simulated deal stays simulated even after delivery evidence is added.</p></div>`;
   const sel = ds.find(x => x.id === st.lastDeal) || ds[0];
   h += `<div class="card"><h2>Impact ledger: deal #${sel.id}</h2><div class="scroll"><table><tr><th>Measure</th><th class="n">Value</th><th>Label</th></tr>${(sel.impact.metrics || []).map(m => `<tr><td class="w">${esc(m.metric)}${m.note ? `<div class="note">${esc(m.note)}</div>` : ""}${m.source ? `<div class="note">${esc(m.source)}</div>` : ""}</td><td class="n">${m.value == null ? "–" : m.unit === "INR" ? inr(m.value) : num(m.value, 1) + " " + esc(m.unit)}</td><td>${chip(m.label)}</td></tr>`).join("")}</table></div><p class="note">CO₂ stays empty until a cited emission factor is entered. No landfill diversion is claimed for metals, because they are recycled anyway.</p></div>`;
   el.innerHTML = h;
@@ -240,7 +340,7 @@ async function vConnect(el) {
     const lbl = st.impMeasured ? "measured" : "sample";
     h += `<div class="tiles"><div class="tile"><b>${r.rows_read}</b><span>Rows read</span></div><div class="tile hi"><b>${r.surplus.length}</b><span>Found as surplus</span></div><div class="tile"><b>${r.kept.length}</b><span>Kept as working stock</span></div><div class="tile"><b>${r.rejected.length}</b><span>Rejected rows</span></div></div>`;
     h += `<div class="card"><div class="ctrl"><h2>Found as surplus (${r.surplus.length})</h2>${chip(lbl)}</div>${r.surplus.length ? `<div class="scroll"><table><tr><th class="n">Row</th><th>Item</th><th>Seller</th><th>What it is</th>${durable ? '<th class="n">Days unused</th>' : '<th class="n">Hours left</th>'}<th>Caught by</th></tr>${r.surplus.map(x => `<tr><td class="n">${x.row}</td><td>${esc(x.item.id)}</td><td>${esc(x.item.seller_id)}</td><td class="w">${esc(impDesc(lane, x.item))}</td><td class="n">${durable ? num(x.item.days_unused) : num(x.item.hours_left, x.item.hours_left % 1 ? 1 : 0)}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td></tr>`).join("")}</table></div>
-      <div class="ctrl noprint"><label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="impMeas" ${st.impMeasured ? "checked" : ""}>These are measured values</label><button class="btn pri" id="impList" type="button">List surplus on the marketplace</button><span id="impMsg" class="note" aria-live="polite">${S.listed ? `${S.listed.listed} item(s) listed as ${esc(S.listed.label)}. <a href="#seller/stock/${lane}" id="toStock">Open Stock and passports</a> to see passports and QR codes.` : ""}</span></div>
+      <div class="ctrl noprint"><label class="check"><input type="checkbox" id="impMeas" ${st.impMeasured ? "checked" : ""}>These are measured values</label><button class="btn pri" id="impList" type="button">List surplus on the marketplace</button><span id="impMsg" class="note" aria-live="polite">${S.listed ? `${S.listed.listed} item(s) listed as ${esc(S.listed.label)}. <a href="#seller/stock/${lane}" id="toStock">Open Stock and passports</a> to see passports and QR codes.` : ""}</span></div>
       <p class="note">Listed items are labelled ${lbl === "measured" ? "Measured" : "Sample"}. Tick the box only if the sizes and dates come from your own records. No scrap price is shown for imported items until a dated quote is entered.</p>`
       : `<div class="empty">No surplus found with these rules. Every accepted item is working stock.</div>`}</div>`;
     h += `<div class="cols"><div class="card"><h2>Kept as working stock (${r.kept.length})</h2>${r.kept.length ? `<div class="scroll"><table><tr><th class="n">Row</th><th>Item</th><th>What it is</th><th>Why it stays</th></tr>${r.kept.map(x => `<tr><td class="n">${x.row}</td><td>${esc(x.item.id)}</td><td class="w">${esc(impDesc(lane, x.item))}</td><td class="w">${esc(x.reason)}</td></tr>`).join("")}</table></div>` : `<div class="empty">Every accepted item was found as surplus.</div>`}</div>
@@ -462,7 +562,7 @@ async function vSim(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {connect: vConnect, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {connect: vConnect, browse: vBrowse, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();
@@ -470,7 +570,7 @@ async function render() {
   const [t, sub] = TITLES[st.view];
   const head = `<header><h1>${esc(t)}</h1><p class="mut">${esc(sub)}</p></header>`;
   const body = document.createElement("div");
-  body.style.cssText = "display:flex;flex-direction:column;gap:18px;min-width:0";
+  body.className = "stack";
   if (!main.dataset.view || main.dataset.view !== st.view + st.lane + st.role) main.innerHTML = head + `<div class="spin">Loading…</div>`;
   try { await VIEWS[st.view](body); } catch (e) { body.innerHTML = errBox(e); }
   if (my !== ticket) return;

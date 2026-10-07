@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime, timezone
@@ -29,7 +30,7 @@ from engine.gapfill import GapFillRequest, plan_gap_fill
 from engine.impact import DealImpactInput, EmissionFactor, compute
 from engine import importer as IMP
 from engine.models import Demand, PlanRequest, Resource, Seller, Settings, Transport
-from engine.pooling import fulfil
+from engine.pooling import _dist, fulfil
 from engine.recovery import plan
 from engine.routes import seller_plan, seller_routes
 
@@ -340,7 +341,10 @@ main{{max-width:520px;margin:0 auto;padding:20px 16px;display:flex;flex-directio
 h1{{font-size:1.3rem;margin:0}} dl{{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0}} dt{{color:#5d6b77}} dd{{margin:0}}
 .chip{{display:inline-block;background:#fff2dc;color:#8a4b00;border:1px solid #8a4b00;border-radius:99px;padding:1px 10px;font-size:12px;font-weight:600;text-transform:uppercase}}
 svg{{width:140px;height:140px}} .note{{color:#5d6b77;font-size:13px}}
-@media print{{body{{background:#fff}}}}
+img.photo{{display:block;width:100%;height:auto;border-radius:6px;margin:8px 0}} form{{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}}
+button{{font:inherit;font-weight:600;padding:6px 14px;border-radius:6px;border:1px solid #c4ccd3;background:#fff;cursor:pointer}} button:hover{{border-color:#5d6b77}}
+button:focus-visible,input:focus-visible{{outline:2px solid #d9780f;outline-offset:2px}}
+@media print{{body{{background:#fff}} .noprint{{display:none}}}}
 </style><main>{body}</main>"""
 
 
@@ -367,8 +371,29 @@ def passport(key: str, rid: str, request: Request):
     qr_url = f"/api/qr.svg?data={_origin(request)}/passport/{key}/{rid}"
     body = (f'<div class="card"><h1>Offcut passport</h1><p><span class="chip">{e(item["label"])} data</span></p><dl>{dl}</dl></div>'
             f'<div class="card"><b>Deal history</b><p class="note">No deals recorded for this item yet. A deal appears here once it is dispatched and confirmed.</p></div>'
-            f'<div class="card"><img alt="QR code for this passport" src="{e(qr_url)}" width="140" height="140"><p class="note">Scan to open this passport.</p></div>')
+            f'<div class="card"><img alt="QR code for this passport" src="{e(qr_url)}" width="140" height="140"><p class="note">Scan to open this passport.</p></div>'
+            + _photo_card(key, rid, item))
     return _PAGE.format(title=f"Passport {item['id']}", body=body)
+
+
+def _photo_card(key: str, rid: str, item: dict) -> str:
+    """Optional photo of this exact item, uploaded by the seller. Never a stock image."""
+    e, url = _html.escape, _photo_url(key, rid)
+    shown = (f'<img class="photo" alt="Photo of {e(rid)} uploaded by the seller" src="{e(url)}">'
+             f'<p class="note">Photo uploaded by the seller.</p>' if url else
+             '<p class="note">No photo yet. Only a photo the seller takes of this item is shown; no stock images.</p>')
+    api = json.dumps(f"/api/photo/{key}/{rid}").replace("</", "<\\/")
+    what = "lot" if item["kind"] == "perishable" else "piece"
+    remove = '<button type="button" id="pdel">Remove photo</button>' if url else ""
+    return (f'<div class="card"><b>Photo</b>{shown}<div class="noprint"><form id="pf"><input type="file" id="pfile" accept="image/jpeg,image/png,image/webp" aria-label="Photo file">'
+            f'<button type="submit">{"Replace photo" if url else "Upload photo"}</button>{remove}</form>'
+            f'<p class="note" id="pmsg" aria-live="polite">Seller only: a photo of this exact {what}. JPEG, PNG or WebP, up to 5 MB.</p></div></div>'
+            f'<script>const PURL={api},msg=t=>document.getElementById("pmsg").textContent=t;'
+            'document.getElementById("pf").onsubmit=async ev=>{ev.preventDefault();const f=document.getElementById("pfile").files[0];'
+            'if(!f){msg("Choose a photo first.");return}msg("Uploading...");'
+            'const r=await fetch(PURL,{method:"POST",headers:{"Content-Type":f.type||"application/octet-stream"},body:f});'
+            'if(r.ok)location.reload();else{const t=await r.json().catch(()=>({}));msg(t.detail||"Upload failed. Try a JPEG or PNG under 5 MB.")}};'
+            'const d=document.getElementById("pdel");if(d)d.onclick=async()=>{await fetch(PURL,{method:"DELETE"});location.reload()};</script>')
 
 
 @app.get("/labels/{key}", response_class=HTMLResponse)
@@ -495,3 +520,152 @@ def import_cutting_job(j: CuttingJob):
     except ValueError as e:
         _bad(e)
     return {"gapfill": g}
+
+
+# ---------------- Browse surplus (buyer marketplace) and seller photos ----------------
+PHOTOS = ROOT.parent / "uploads" / "photos"
+PHOTO_TYPES = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+PHOTO_MAX = 5 * 1024 * 1024
+
+
+def _photo_file(key: str, rid: str) -> Path | None:
+    folder = PHOTOS / re.sub(r"[^A-Za-z0-9_]", "_", key)
+    for ext in PHOTO_TYPES.values():
+        f = folder / (rid.encode().hex() + ext)  # hex name: any item id becomes a safe, unique file name
+        if f.exists():
+            return f
+    return None
+
+
+def _photo_url(key: str, rid: str) -> str | None:
+    f = _photo_file(key, rid)
+    return f"/api/photo/{key}/{rid}?v={int(f.stat().st_mtime)}" if f else None
+
+
+def _sniff(data: bytes) -> str | None:
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _item_or_404(key: str, rid: str) -> dict:
+    item = next((i for i in _stock(key) if i["id"] == rid), None)
+    if item is None:
+        raise HTTPException(404, "no such item")
+    return item
+
+
+@app.post("/api/photo/{key}/{rid}")
+async def upload_photo(key: str, rid: str, request: Request):
+    """The seller's own photo of this item. The body is the image file itself (JPEG, PNG or WebP)."""
+    _item_or_404(key, rid)
+    ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
+    if ctype not in PHOTO_TYPES:
+        raise HTTPException(415, "Send a JPEG, PNG or WebP photo.")
+    data = await request.body()
+    if not data:
+        raise HTTPException(422, "The photo is empty. Choose the file again.")
+    if len(data) > PHOTO_MAX:
+        raise HTTPException(413, "The photo is larger than 5 MB. Resize it and try again.")
+    if _sniff(data) != ctype:
+        raise HTTPException(422, "The file is not a real JPEG, PNG or WebP image.")
+    old = _photo_file(key, rid)
+    if old:
+        old.unlink()
+    f = PHOTOS / re.sub(r"[^A-Za-z0-9_]", "_", key) / (rid.encode().hex() + PHOTO_TYPES[ctype])
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_bytes(data)
+    return {"photo": _photo_url(key, rid)}
+
+
+@app.get("/api/photo/{key}/{rid}")
+def get_photo(key: str, rid: str):
+    f = _photo_file(key, rid)
+    if f is None:
+        raise HTTPException(404, "no photo for this item")
+    return FileResponse(f, media_type={v: k for k, v in PHOTO_TYPES.items()}[f.suffix])
+
+
+@app.delete("/api/photo/{key}/{rid}")
+def delete_photo(key: str, rid: str):
+    f = _photo_file(key, rid)
+    if f:
+        f.unlink()
+    return {"removed": bool(f)}
+
+
+def _browse_scenario(key: str) -> tuple[list[dict], str]:
+    d = SC.dataset(key)
+    cfg, sellers, demands = d["settings"], {s.id: s for s in d["sellers"]}, d["demands"]
+    buyer = demands[0]  # distances are measured from the first open order's buyer in this sample cluster
+    out = []
+    for p in d["resources"]:
+        eng, seller = REGISTRY[p.kind], sellers[p.seller_id]
+        kg = eng.resource_kg(p, cfg)
+        offer = seller.salvage_for(eng.salvage_key(p))
+        alt = {"value": round(kg * offer.price_per_kg, 2), "price_per_kg": offer.price_per_kg, "label": offer.label,
+               "quoted_on": offer.quoted_on.isoformat() if offer.quoted_on else None}
+        item = {**p.model_dump(mode="json"), "key": key, "seller_name": seller.name, "kg": round(kg, 2),
+                "distance_km": round(_dist((seller.x_km, seller.y_km), (buyer.x_km, buyer.y_km)), 1),
+                "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id)}
+        if p.kind == "perishable":
+            item["disposal"] = alt
+        else:
+            item["material_name"] = M_name(p.material)
+            item["floor"] = alt
+            same = [x for x in demands if x.kind == p.kind and x.material == p.material]
+            low = min(same, key=lambda x: x.new_price_per_kg) if same else None  # the cautious ceiling
+            item["ceiling"] = None if low is None else {"value": round(kg * low.new_price_per_kg, 2),
+                                                        "price_per_kg": low.new_price_per_kg, "label": low.label,
+                                                        "buyer_name": low.buyer_name}
+        fits, why = None, None
+        for i, dm in enumerate(demands):
+            if dm.kind != p.kind or not eng.relevant(p, dm):
+                continue
+            reason = eng.check(p, dm, seller, cfg)
+            if reason is None and eng.capacity(p, dm, cfg) <= 0:
+                reason = f"too small for one {dm.part_name}"
+            if reason is None:
+                fits = (i, dm)
+                break
+            why = why or f"{dm.buyer_name}: {reason}"
+        item["order"] = {"scenario": key, "index": fits[0], "demand_id": fits[1].id, "buyer_name": fits[1].buyer_name} if fits else None
+        item["order_reason"] = None if fits else (why or "No open order in this cluster takes this kind of stock.")
+        out.append(item)
+    return out, buyer.buyer_name
+
+
+def _browse_imported(lane: str) -> list[dict]:
+    from engine.models import PerishableLot
+    key = f"import_{lane}"
+    with closing(db()) as con:
+        rows = con.execute("SELECT * FROM imported_stock WHERE lane=? ORDER BY listed_at, item_id", (lane,)).fetchall()
+    out = []
+    for r in rows:
+        p = (IMP.ImportedSheet if lane == "durable" else PerishableLot).model_validate_json(r["item"])
+        item = {**p.model_dump(mode="json"), "key": key, "label": r["label"], "seller_name": p.seller_id,
+                "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2), "distance_km": None,
+                "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id), "rules": json.loads(r["rules"]),
+                "source": IMP.SOURCE, "order": None,
+                "order_reason": "Imported stock is not in the matching data yet. Open its passport to contact the seller."}
+        if p.kind == "perishable":
+            item["disposal"] = None
+        else:
+            item.update(material_name=M_name(p.material), floor=None, ceiling=None)
+        out.append(item)
+    return out
+
+
+@app.get("/api/browse/{lane}")
+def browse(lane: Literal["durable", "fresh"]):
+    """Every stock item in this lane as a marketplace listing: sample scenarios plus stock listed from a CSV import."""
+    items, buyers = [], {}
+    for key, sc in SC.SCENARIOS.items():
+        if (sc["engine"] == "perishable") == (lane == "fresh"):
+            rows, buyers[key] = _browse_scenario(key)
+            items += rows
+    return {"lane": lane, "items": items + _browse_imported(lane), "distance_from": buyers}

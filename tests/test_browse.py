@@ -1,0 +1,92 @@
+"""Browse surplus (buyer marketplace) and seller photos on the passport."""
+import base64
+import math
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app.main as main
+from engine import scenarios as SC
+
+c = TestClient(main.app)
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+
+@pytest.fixture(autouse=True)
+def temp_storage(tmp_path, monkeypatch):
+    monkeypatch.setattr(main, "DB", tmp_path / "test.db")
+    monkeypatch.setattr(main, "PHOTOS", tmp_path / "photos")
+
+
+def items(lane):
+    return {f"{i['key']}:{i['id']}": i for i in c.get(f"/api/browse/{lane}").json()["items"]}
+
+
+def test_browse_lists_every_sample_item_in_its_lane():
+    dur, fresh = items("durable"), items("fresh")
+    expected = sum(len(SC.dataset(k)["resources"]) for k in ("steel", "sheets", "bars"))
+    assert len(dur) == expected and len(fresh) == len(SC.dataset("food")["resources"])
+    assert all(i["label"] == "sample" and i["photo"] is None for i in [*dur.values(), *fresh.values()])
+    assert c.get("/api/browse/textile").status_code == 422
+
+
+def test_durable_price_range_and_distance():
+    a1 = items("durable")["steel:A1"]
+    kg = 2500 * 1250 * 2.0 * 7850e-9
+    assert a1["floor"]["value"] == pytest.approx(kg * 30.0, abs=0.01)  # seller's scrap price
+    assert a1["ceiling"]["value"] == pytest.approx(kg * 62.0, abs=0.01)  # buyer's new-plate price
+    assert a1["floor"]["label"] == "sample" and a1["floor"]["quoted_on"] is None
+    assert a1["distance_km"] == pytest.approx(round(math.hypot(2.0, 1.5), 1))  # Fabricator A to Workshop W
+    assert items("durable")["steel:A4"]["defects"][0]["note"] == "rust patch"
+    assert items("durable")["sheets:Ass1"]["ceiling"] is None  # no buyer price for stainless in that cluster
+
+
+def test_order_is_preselected_or_refused_with_reason():
+    dur = items("durable")
+    assert dur["steel:A1"]["order"] == {"scenario": "steel", "index": 0, "demand_id": "S1", "buyer_name": "Workshop W"}
+    assert dur["steel:A13"]["order"] is None and "thickness" in dur["steel:A13"]["order_reason"]
+    assert "bent" in dur["steel:B6"]["order_reason"]
+    fresh = items("fresh")
+    assert fresh["food:H1"]["order"]["demand_id"] == "F1"
+    assert "used cooking oil" in fresh["food:K3"]["order_reason"]
+
+
+def test_fresh_cards_have_hours_and_disposal_cost():
+    h3 = items("fresh")["food:H3"]
+    assert h3["hours_left"] == 5 and h3["disposal"]["value"] == pytest.approx(-36.0)
+    assert "ceiling" not in h3
+
+
+def test_imported_stock_appears_without_invented_prices():
+    text = (main.EXAMPLES / "durable_stock_example.csv").read_text()
+    c.post("/api/import/list", json={"lane": "durable", "csv_text": text, "measured": True})
+    imp = [i for i in items("durable").values() if i["key"] == "import_durable"]
+    assert len(imp) == 5 and all(i["label"] == "measured" for i in imp)
+    assert all(i["floor"] is None and i["ceiling"] is None and i["distance_km"] is None and i["order"] is None for i in imp)
+
+
+def test_photo_upload_show_replace_and_remove():
+    assert "No photo yet" in c.get("/passport/steel/A1").text
+    r = c.post("/api/photo/steel/A1", content=PNG, headers={"Content-Type": "image/png"})
+    assert r.status_code == 200 and r.json()["photo"].startswith("/api/photo/steel/A1")
+    got = c.get("/api/photo/steel/A1")
+    assert got.status_code == 200 and got.content == PNG and got.headers["content-type"] == "image/png"
+    assert items("durable")["steel:A1"]["photo"].startswith("/api/photo/steel/A1")
+    assert items("durable")["steel:A2"]["photo"] is None  # never a photo the seller did not upload
+    assert "uploaded by the seller" in c.get("/passport/steel/A1").text
+    assert c.post("/api/photo/steel/A1", content=JPEG, headers={"Content-Type": "image/jpeg"}).status_code == 200
+    assert c.get("/api/photo/steel/A1").headers["content-type"] == "image/jpeg"  # replaced, not duplicated
+    assert c.delete("/api/photo/steel/A1").json() == {"removed": True}
+    assert c.get("/api/photo/steel/A1").status_code == 404 and items("durable")["steel:A1"]["photo"] is None
+
+
+def test_photo_upload_is_checked():
+    post = lambda body, ctype, rid="A1": c.post(f"/api/photo/steel/{rid}", content=body, headers={"Content-Type": ctype})
+    assert post(b"hello", "text/plain").status_code == 415
+    assert post(b"", "image/png").status_code == 422
+    assert post(b"not really a png", "image/png").status_code == 422
+    assert post(PNG, "image/jpeg").status_code == 422  # declared type must match the bytes
+    assert post(b"\x89PNG\r\n\x1a\n" + b"0" * main.PHOTO_MAX, "image/png").status_code == 413
+    assert post(PNG, "image/png", rid="ZZ").status_code == 404
+    assert c.post("/api/photo/nowhere/A1", content=PNG, headers={"Content-Type": "image/png"}).status_code == 404

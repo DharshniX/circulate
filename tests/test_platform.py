@@ -29,7 +29,10 @@ def test_passport_page_qr_and_labels():
     assert c.get("/labels/food").status_code == 200
 
 
-def test_data_quality_never_reports_sample_as_measured():
+def test_data_quality_never_reports_sample_as_measured(tmp_path, monkeypatch):
+    # an empty database, so stock a seller has imported as measured does not count here
+    import app.main as main
+    monkeypatch.setattr(main, "DB", tmp_path / "test.db")
     rows = c.get("/api/data-quality").json()["rows"]
     assert not any(r["label"] == "measured" for r in rows)
     assert any(r["label"] == "simulated" for r in rows)
