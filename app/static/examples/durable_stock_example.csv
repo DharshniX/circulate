@@ -1,0 +1,12 @@
+item_id,seller_id,material,length_mm,width_mm,thickness_mm,grade,condition,is_full_sheet,days_unused
+MS-101,A,mild_steel,2500,1250,6,E250,new,true,4
+MS-102,A,mild_steel,2500,1250,6,E250,good,true,45
+MS-103,A,mild_steel,1100,450,6,E250,good,false,12
+MS-104,A,mild_steel,820,610,3,E250,surface_rust,false,60
+MS-105,A,mild_steel,2500,1250,3,E350,new,true,10
+AL-201,A,aluminium,1250,600,1.5,5052,good,false,20
+SS-301,A,stainless_304,1000,500,2,304,good,false,95
+PW-401,A,plywood,2440,1220,18,BWR,good,true,2
+MS-106,A,mild_steel,900,-300,6,E250,good,false,8
+MS-107,A,copper,600,400,2,C101,good,false,30
+MS-108,A,mild_steel,700,500,5,E250,good,maybe,40

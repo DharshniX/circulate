@@ -27,6 +27,7 @@ from engine import scenarios as SC
 from engine.engines import REGISTRY
 from engine.gapfill import GapFillRequest, plan_gap_fill
 from engine.impact import DealImpactInput, EmissionFactor, compute
+from engine import importer as IMP
 from engine.models import Demand, PlanRequest, Resource, Seller, Settings, Transport
 from engine.pooling import fulfil
 from engine.recovery import plan
@@ -46,6 +47,8 @@ def db():
         demand_id TEXT, buyer_name TEXT, sellers TEXT, units REAL, unit_name TEXT, kg_in_units REAL,
         kg_shipped REAL, route_km REAL, value_above_salvage REAL, buyer_utilisation REAL,
         status TEXT, is_simulated INTEGER, evidence TEXT, buyer_confirmed INTEGER, history TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS imported_stock (
+        lane TEXT, item_id TEXT, item TEXT, rules TEXT, label TEXT, listed_at TEXT, PRIMARY KEY (lane, item_id))""")
     return con
 
 
@@ -267,7 +270,34 @@ def M_name(key: str) -> str:
     return M.get(key).name
 
 
+IMPORT_KEYS = {"import_durable": "durable", "import_fresh": "fresh"}
+
+
+def _imported_stock(key: str) -> list[dict]:
+    from engine.models import PerishableLot
+    lane = IMPORT_KEYS[key]
+    with closing(db()) as con:
+        rows = con.execute("SELECT * FROM imported_stock WHERE lane=? ORDER BY listed_at, item_id", (lane,)).fetchall()
+    out = []
+    for r in rows:
+        p = (IMP.ImportedSheet if lane == "durable" else PerishableLot).model_validate_json(r["item"])
+        item = {"id": p.id, "seller_id": p.seller_id, "seller_name": p.seller_id, "kind": p.kind,
+                "description": _describe(p), "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2),
+                "scrap_value": None, "scrap_price_per_kg": None, "label": r["label"], "status": "available",
+                "passport": f"/passport/{key}/{p.id}", "rules": json.loads(r["rules"]), "source": IMP.SOURCE,
+                "listed_at": r["listed_at"]}
+        if p.kind == "perishable":
+            item["hours_left"] = p.hours_left
+            item["urgent"] = True
+        else:
+            item["days_unused"] = p.days_unused
+        out.append(item)
+    return out
+
+
 def _stock(key: str) -> list[dict]:
+    if key in IMPORT_KEYS:
+        return _imported_stock(key)
     if key not in SC.SCENARIOS:
         raise HTTPException(404, f"unknown scenario {key}")
     d = SC.dataset(key)
@@ -325,8 +355,12 @@ def passport(key: str, rid: str, request: Request):
         raise HTTPException(404, "no such item")
     e = _html.escape
     rows = [("Passport ID", f"{key}:{item['id']}"), ("Seller", item["seller_name"]), ("What it is", item["description"]),
-            ("Weight", f"{item['kg']} kg"), ("Scrap value", f"Rs {item['scrap_value']:,.0f} at Rs {item['scrap_price_per_kg']}/kg"),
+            ("Weight", f"{item['kg']} kg"),
+            ("Scrap value", "No scrap price entered yet. Add a dated quote before showing one." if item["scrap_value"] is None
+             else f"Rs {item['scrap_value']:,.0f} at Rs {item['scrap_price_per_kg']}/kg"),
             ("Status", item["status"]), ("Data", item["label"].title())]
+    if "source" in item:
+        rows += [("Source", item["source"]), ("Found as surplus by", "; ".join(item["rules"]))]
     if "hours_left" in item:
         rows.insert(3, ("Shelf life left", f"{item['hours_left']:g} hours"))
     dl = "".join(f"<dt>{e(a)}</dt><dd>{e(str(b))}</dd>" for a, b in rows)
@@ -365,6 +399,8 @@ def data_quality():
     with closing(db()) as con:
         n_sim = con.execute("SELECT COUNT(*) FROM deals WHERE is_simulated=1").fetchone()[0]
         n_real = con.execute("SELECT COUNT(*) FROM deals WHERE is_simulated=0").fetchone()[0]
+        for lane, label, n in con.execute("SELECT lane, label, COUNT(*) FROM imported_stock GROUP BY lane, label"):
+            rows.append({"area": f"Imported stock (CSV), {lane}", "label": label, "count": n})
     rows.append({"area": "Deals made in this demo", "label": "simulated", "count": n_sim})
     rows.append({"area": "Deals with real delivery", "label": "verified", "count": n_real})
     return {"rows": rows}
@@ -376,3 +412,86 @@ def sim_summary():
     if not p.exists():
         raise HTTPException(404, "research/sim_summary.json is missing")
     return json.loads(p.read_text())
+
+
+# ---------------- Connect your system: import from ERP or POS export (CSV) ----------------
+EXAMPLES = ROOT / "static" / "examples"
+
+
+class ImportRequest(BaseModel):
+    lane: Literal["durable", "fresh"]
+    csv_text: str = Field(max_length=2_000_000)
+    days_unused_limit: int = Field(30, ge=0, le=36500)
+    hours_left_limit: float = Field(24, ge=0, le=24 * 365)
+
+
+class ListRequest(ImportRequest):
+    measured: bool = False
+
+
+class CuttingJob(BaseModel):
+    sheet_length_mm: float = Field(gt=0, le=12000)
+    sheet_width_mm: float = Field(gt=0, le=4000)
+    thickness_mm: float = Field(gt=0, le=100)
+    grade: str = Field(min_length=1)
+    part_name: str = "own part"
+    part_length_mm: float = Field(gt=0)
+    part_width_mm: float = Field(gt=0)
+    quantity: int = Field(ge=1, le=10000)
+
+
+def _run_import(req: ImportRequest, label="sample"):
+    try:
+        return IMP.run_import(req.lane, req.csv_text, req.days_unused_limit, req.hours_left_limit, label)
+    except ValueError as e:
+        _bad(e)
+
+
+@app.get("/api/import/example/{lane}")
+def import_example(lane: Literal["durable", "fresh"]):
+    name = f"{lane}_stock_example.csv"
+    return FileResponse(EXAMPLES / name, media_type="text/csv", filename=name)
+
+
+@app.post("/api/import/preview")
+def import_preview(req: ImportRequest):
+    """Check every row and sort the good ones into surplus and working stock. Nothing is stored."""
+    return _run_import(req)
+
+
+@app.post("/api/import/list")
+def import_list(req: ListRequest):
+    """List the surplus items on the marketplace (stock board, passports, QR codes)."""
+    label = "measured" if req.measured else "sample"
+    r = _run_import(req, label)
+    if not r["surplus"]:
+        _bad(ValueError("Nothing was found as surplus, so nothing was listed. Lower the thresholds or check the file."))
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with closing(db()) as con, con:
+        for s in r["surplus"]:
+            con.execute("INSERT OR REPLACE INTO imported_stock (lane, item_id, item, rules, label, listed_at) VALUES (?,?,?,?,?,?)",
+                        (req.lane, s["item"]["id"], json.dumps(s["item"]), json.dumps(s["rules"]), label, now))
+    key = f"import_{req.lane}"
+    return {"listed": len(r["surplus"]), "label": label, "stock_key": key, "items": _stock(key)}
+
+
+@app.post("/api/import/clear")
+def import_clear(lane: Literal["durable", "fresh"]):
+    with closing(db()) as con, con:
+        n = con.execute("DELETE FROM imported_stock WHERE lane=?", (lane,)).rowcount
+    return {"removed": n}
+
+
+@app.post("/api/import/cutting-job")
+def import_cutting_job(j: CuttingJob):
+    """Turn the next cutting job into a Sold-before-it's-cut request, checked by the engine before it is sent."""
+    g = SC.gapfill_demo()
+    g["sheet"].update(length_mm=j.sheet_length_mm, width_mm=j.sheet_width_mm, thickness_mm=j.thickness_mm,
+                      grade=j.grade.strip().upper())
+    g["job"] = dict(part_name=j.part_name.strip() or "own part", length_mm=j.part_length_mm, width_mm=j.part_width_mm,
+                    quantity=j.quantity)
+    try:
+        plan_gap_fill(GapFillRequest(**g))
+    except ValueError as e:
+        _bad(e)
+    return {"gapfill": g}

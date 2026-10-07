@@ -22,10 +22,11 @@ const LANES = {durable: {name: "Durable", cls: "np", scen: ["steel", "sheets", "
 const ROLES = {buyer: "Buyer", seller: "Seller", admin: "Admin"};
 const NAV = {
   buyer: [["match", "Order and match"], ["deals", "My deals"]],
-  seller: [["gapfill", "Sold before it's cut", "durable"], ["offers", "Offers and recovery plan"], ["stock", "Stock and passports"]],
+  seller: [["connect", "Connect your system"], ["gapfill", "Sold before it's cut", "durable"], ["offers", "Offers and recovery plan"], ["stock", "Stock and passports"]],
   admin: [["monitor", "Deal monitor"], ["quality", "Data quality"], ["prices", "Price references"], ["rules", "Rules"], ["sim", "Simulation lab"]],
 };
 const TITLES = {
+  connect: ["Connect your system", "Import from ERP or POS export (CSV). Upload the stock file your system exports; the engine checks every row and finds the surplus."],
   match: ["Order and match", "Say what you need. The engine checks every seller's stock, nests the parts and finds the cheapest pickup."],
   deals: ["My deals", "Track each order from agreed to dispatched to delivered."],
   gapfill: ["Sold before it's cut", "Fill the empty space in your cutting plan with parts your neighbours have already ordered."],
@@ -38,7 +39,9 @@ const TITLES = {
   sim: ["Simulation lab", "Gap Fill tested on 5,000 simulated sheets. Simulated, sample prices."],
 };
 const st = {lane: "durable", role: "seller", view: "gapfill", scen: {durable: "steel", fresh: "food"}, ord: {}, rate: {}, off: {},
-  plan: {rejected: [], elapsed: 0, key: null}, deadline: {}, gf: null, gfDeclined: [], sellerFilter: "", lastDeal: null};
+  plan: {rejected: [], elapsed: 0, key: null}, deadline: {}, gf: null, gfDeclined: [], sellerFilter: "", lastDeal: null,
+  imp: {durable: {}, fresh: {}}, impLimit: {days: 30, hours: 24}, impMeasured: false,
+  job: {sheet_length_mm: 2500, sheet_width_mm: 1250, thickness_mm: 6, grade: "E250", part_name: "base plate", part_length_mm: 450, part_width_mm: 350, quantity: 9}};
 
 function navFor(role, lane) { return NAV[role].filter(n => !n[2] || n[2] === lane); }
 function readHash() {
@@ -46,7 +49,7 @@ function readHash() {
   if (ROLES[role]) st.role = role;
   if (LANES[lane]) st.lane = lane;
   if (view && navFor(st.role, st.lane).some(n => n[0] === view)) st.view = view;
-  else st.view = navFor(st.role, st.lane)[0][0];
+  else if (!navFor(st.role, st.lane).some(n => n[0] === st.view)) st.view = navFor(st.role, st.lane)[0][0];
 }
 function go(patch) {
   Object.assign(st, patch);
@@ -122,6 +125,7 @@ async function vMatch(el) {
   const data = structuredClone(S.data);
   data.transport.rate_multiplier = rate;
   const sellerIds = S.data.sellers.map(s => s.id).filter(id => !off.has(id));
+  const sellerName = id => (S.data.sellers.find(s => s.id === id) || {}).name || id;
   let f, err;
   try { f = await api("/api/fulfil", {demand_id: d.id, data, seller_ids: sellerIds, allow_partial: true}); } catch (e) { err = e; }
   const ctrl = `<div class="card noprint"><div class="ctrl">${await scenSeg()}
@@ -133,20 +137,20 @@ async function vMatch(el) {
   let h = ctrl;
   if (!b) h += `<div class="card"><h2>No match</h2><p>${esc(f.message)}</p>${rejList(f)}</div>`;
   else {
-    const v = b.value;
+    const v = b.value, kgCol = f.unit_name !== "kg";
     h += `<div class="card"><div class="ctrl"><h2>${esc(d.buyer_name)} needs ${num(d.quantity, fresh ? 1 : 0)} ${esc(d.part_name)}</h2>${f.feasible ? '<span class="pill p-ok">Fully matched</span>' : `<span class="pill p-warn">Short by ${num(f.shortfall, 1)}</span>`}${v.is_donation ? '<span class="pill p-mut">Donation</span>' : ""}</div>
       <p class="mut">${esc(f.message)}</p>
       <div class="fig"><div><b>${inr(v.buyer_value_W)}</b><span>${fresh ? "Worth to the buyer" : "Same parts from new sheet"}</span></div><div><b>${inr(v.salvage_value_S)}</b><span>${fresh ? "Seller's disposal alternative" : "Sold as scrap"}</span></div><div><b>${inr(v.transport_T)}</b><span>Transport</span></div><div class="g"><b>${inr(v.gain_G)}</b><span>Value created</span></div><div><b>${inr(v.buyer_saving)}</b><span>Buyer saves</span></div></div>
       ${split(v)}
-      <p class="note">${esc(b.vehicle)} · ${num(b.route_km, 2)} km round trip · ${b.trips} trip(s) · pickup ${b.pickup_order.map(esc).join(" → ")} · without this the stock would be ${esc(b.counterfactual.join(", "))}. Prices are sample data.</p>
+      <p class="note">${esc(b.vehicle)} · ${num(b.route_km, 2)} km round trip · ${b.trips} ${b.trips === 1 ? "trip" : "trips"} · pickup ${b.pickup_order.map(esc).join(" → ")} · without this the stock would be ${esc(b.counterfactual.join(", "))}. Prices are sample data.</p>
       <div class="ctrl noprint"><button class="btn pri" id="accept" type="button">Accept this order</button><span id="acceptMsg" class="note" aria-live="polite"></span></div></div>`;
-    h += `<div class="cols"><div class="card"><h2>Who supplies it</h2><div class="scroll"><table><tr><th>Seller</th><th class="n">${esc(f.unit_name)}</th><th class="n">kg</th><th class="n">Alternative</th><th class="n">Gain</th></tr>${b.per_seller.map(p => `<tr><td>${esc(p.seller_name)}</td><td class="n">${num(p.units, fresh ? 1 : 0)}</td><td class="n">${num(p.kg_shipped, 1)}</td><td class="n">${inr(p.salvage_value)}</td><td class="n">${inr(p.gain_above_salvage)}</td></tr>`).join("")}</table></div>
+    h += `<div class="cols"><div class="card"><h2>Who supplies it</h2><div class="scroll"><table><tr><th>Seller</th><th class="n">${esc(f.unit_name)}</th>${kgCol ? '<th class="n">kg</th>' : ""}<th class="n">Alternative</th><th class="n">Gain</th></tr>${b.per_seller.map(p => `<tr><td>${esc(p.seller_name)}</td><td class="n">${num(p.units, fresh ? 1 : 0)}</td>${kgCol ? `<td class="n">${num(p.kg_shipped, 1)}</td>` : ""}<td class="n">${inr(p.salvage_value)}</td><td class="n">${inr(p.gain_above_salvage)}</td></tr>`).join("")}</table></div>
       <h4>What every seller could supply</h4>${f.seller_capacity.map(c => `<div class="orow"><div>${esc(c.seller_name)}<div class="note">${num(c.distance_km, 1)} km away</div></div><div class="bar ${fresh ? "pe" : ""}"><i style="width:${Math.min(100, c.capacity / Math.max(1, ...f.seller_capacity.map(z => z.capacity)) * 100)}%"></i></div><div class="v">${num(c.capacity, fresh ? 1 : 0)}</div></div>`).join("")}</div>
       <div class="card">${rejList(f)}<h4>Other combinations the engine tried</h4><div class="scroll"><table><tr><th>Sellers</th><th class="n">Value created</th><th class="n">km</th></tr>${f.alternatives.map(a => `<tr><td>${a.sellers_used.map(esc).join(" + ")}</td><td class="n">${inr(a.value.gain_G)}</td><td class="n">${num(a.route_km, 2)}</td></tr>`).join("") || '<tr><td colspan="3" class="mut">None</td></tr>'}</table></div></div></div>`;
     const sheets = b.allocations.filter(a => a.shape === "sheet" && a.parts && a.parts.length);
     if (sheets.length) h += `<div class="card"><h2>Cutting floor</h2><p class="mut">Grey is the seller's piece, drawn to scale; red marks a defect the engine cut around. Yellow shapes are the buyer's parts, placed with ${num(S.data.settings.kerf_mm, 1)} mm kerf and ${num(S.data.settings.edge_margin_mm)} mm edge margin.</p><div class="sheets">${sheets.slice(0, 12).map(sheetSvg).join("")}</div>${sheets.length > 12 ? `<p class="note">Showing 12 of ${sheets.length} pieces used.</p>` : ""}</div>`;
     else if (fresh) h += `<div class="card"><h2>Lots taken</h2><div class="scroll"><table><tr><th>Lot</th><th class="n">Taken kg</th><th class="n">Lot kg</th><th class="n">Hours left</th><th>Storage</th></tr>${b.allocations.map(a => `<tr><td>${esc(a.resource_id)}</td><td class="n">${num(a.taken_kg, 1)}</td><td class="n">${num(a.quantity_kg, 1)}</td><td class="n">${num(a.hours_left)}</td><td>${esc(a.storage)}</td></tr>`).join("")}</table></div><p class="note">Food rules are platform rules and still need expert review.</p></div>`;
-    else h += `<div class="card"><h2>Pieces used</h2><div class="scroll"><table><tr><th>Piece</th><th>Seller</th><th class="n">Cut pieces</th></tr>${b.allocations.map(a => `<tr><td>${esc(a.resource_id)}</td><td>${esc(a.seller_id)}</td><td class="n">${num(a.units)}</td></tr>`).join("")}</table></div></div>`;
+    else h += `<div class="card"><h2>Pieces used</h2><div class="scroll"><table><tr><th>Piece</th><th>Seller</th><th class="n">Cut pieces</th></tr>${b.allocations.map(a => `<tr><td>${esc(a.resource_id)}</td><td>${esc(sellerName(a.seller_id))}</td><td class="n">${num(a.units)}</td></tr>`).join("")}</table></div></div>`;
   }
   el.innerHTML = h;
   bind();
@@ -201,6 +205,94 @@ async function vDeals(el, admin) {
     try { await api(`/api/deals/${id}/advance`, {status: "delivered", evidence: ev ? [ev] : [], buyer_confirmed: conf}); st.lastDeal = +id; render(); }
     catch (e) { msg(`<span class="err">${esc(e.message)}</span>`); }
   });
+}
+
+/* ---------------- Seller: connect your system (CSV import and surplus detection) ---------------- */
+const IMP_COLS = {
+  durable: "item_id, seller_id, material, length_mm, width_mm, thickness_mm, grade, condition, is_full_sheet, days_unused",
+  fresh: "item_id, seller_id, product, category, quantity_kg, storage, hours_left",
+};
+function impDesc(lane, it) {
+  return lane === "durable" ? `${num(it.length_mm)} × ${num(it.width_mm)} × ${num(it.thickness_mm, it.thickness_mm % 1 ? 1 : 0)} mm ${it.material.replace(/_/g, " ")} ${it.grade}, ${it.condition.replace(/_/g, " ")}`
+    : `${it.product}, ${num(it.quantity_kg, 1)} kg, ${it.storage}, ${it.category.replace(/_/g, " ")}`;
+}
+async function impPreview(lane) {
+  const S = st.imp[lane];
+  S.busy = true; S.err = null; S.listed = null; render();
+  try { S.result = await api("/api/import/preview", {lane, csv_text: S.text, days_unused_limit: st.impLimit.days, hours_left_limit: st.impLimit.hours}); }
+  catch (e) { S.result = null; S.err = e; }
+  S.busy = false; render();
+}
+async function vConnect(el) {
+  const lane = st.lane, S = st.imp[lane], durable = lane === "durable", r = S.result;
+  const lim = durable ? `<label class="field">Surplus if unused for at least (days)<input id="impN" type="number" min="0" max="36500" step="1" value="${st.impLimit.days}"></label>`
+    : `<label class="field">Urgent if use-by within (hours)<input id="impH" type="number" min="0" max="8760" step="1" value="${st.impLimit.hours}"></label>`;
+  let h = `<div class="card"><div class="ctrl"><h2>Import from ERP or POS export (CSV)</h2><div class="grow"></div><a class="btn" href="/api/import/example/${lane}" download>Download example file</a></div>
+    <p class="mut">There is no live link to any outside software. Export your ${durable ? "sheet and offcut" : "food"} stock list as a CSV file from the system you use, then upload it here. Nothing is saved until you list items on the marketplace.</p>
+    <div class="ctrl"><label class="field">Stock file (CSV)<input id="impFile" type="file" accept=".csv,text/csv"></label>${lim}
+      ${S.name ? `<span class="note">Loaded: <b>${esc(S.name)}</b></span>` : ""}</div>
+    <p class="note">Columns: <code>${IMP_COLS[lane]}</code>. Extra columns are ignored. The example file has three rows with mistakes, so you can see how rejected rows look.</p>
+    <p class="note">Surplus rules: ${durable ? `a piece that is not a full sheet is an offcut; any piece unused for ${num(st.impLimit.days)} days or more is surplus.` : `a lot with ${num(st.impLimit.hours)} hours or less to its use-by is surplus and marked urgent. Food rules are platform rules that still need expert review.`}</p></div>`;
+  if (S.busy) h += `<div class="spin">Checking every row…</div>`;
+  else if (S.err) h += `<div class="err" role="alert"><b>The file could not be read.</b> ${esc(S.err.message)}</div>`;
+  else if (!r) h += `<div class="empty">No file yet. Upload a stock export, or download the example file above and upload that.</div>`;
+  else {
+    const lbl = st.impMeasured ? "measured" : "sample";
+    h += `<div class="tiles"><div class="tile"><b>${r.rows_read}</b><span>Rows read</span></div><div class="tile hi"><b>${r.surplus.length}</b><span>Found as surplus</span></div><div class="tile"><b>${r.kept.length}</b><span>Kept as working stock</span></div><div class="tile"><b>${r.rejected.length}</b><span>Rejected rows</span></div></div>`;
+    h += `<div class="card"><div class="ctrl"><h2>Found as surplus (${r.surplus.length})</h2>${chip(lbl)}</div>${r.surplus.length ? `<div class="scroll"><table><tr><th class="n">Row</th><th>Item</th><th>Seller</th><th>What it is</th>${durable ? '<th class="n">Days unused</th>' : '<th class="n">Hours left</th>'}<th>Caught by</th></tr>${r.surplus.map(x => `<tr><td class="n">${x.row}</td><td>${esc(x.item.id)}</td><td>${esc(x.item.seller_id)}</td><td class="w">${esc(impDesc(lane, x.item))}</td><td class="n">${durable ? num(x.item.days_unused) : num(x.item.hours_left, x.item.hours_left % 1 ? 1 : 0)}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td></tr>`).join("")}</table></div>
+      <div class="ctrl noprint"><label style="display:inline-flex;gap:6px;align-items:center"><input type="checkbox" id="impMeas" ${st.impMeasured ? "checked" : ""}>These are measured values</label><button class="btn pri" id="impList" type="button">List surplus on the marketplace</button><span id="impMsg" class="note" aria-live="polite">${S.listed ? `${S.listed.listed} item(s) listed as ${esc(S.listed.label)}. <a href="#seller/stock/${lane}" id="toStock">Open Stock and passports</a> to see passports and QR codes.` : ""}</span></div>
+      <p class="note">Listed items are labelled ${lbl === "measured" ? "Measured" : "Sample"}. Tick the box only if the sizes and dates come from your own records. No scrap price is shown for imported items until a dated quote is entered.</p>`
+      : `<div class="empty">No surplus found with these rules. Every accepted item is working stock.</div>`}</div>`;
+    h += `<div class="cols"><div class="card"><h2>Kept as working stock (${r.kept.length})</h2>${r.kept.length ? `<div class="scroll"><table><tr><th class="n">Row</th><th>Item</th><th>What it is</th><th>Why it stays</th></tr>${r.kept.map(x => `<tr><td class="n">${x.row}</td><td>${esc(x.item.id)}</td><td class="w">${esc(impDesc(lane, x.item))}</td><td class="w">${esc(x.reason)}</td></tr>`).join("")}</table></div>` : `<div class="empty">Every accepted item was found as surplus.</div>`}</div>
+      <div class="card"><h2>Rejected rows (${r.rejected.length})</h2><ul class="rej">${r.rejected.map(x => `<li>Row ${x.row} <code>${esc(x.item_id || "no item_id")}</code> ${esc(x.reason)}</li>`).join("") || "<li>None. Every row passed the checks.</li>"}</ul>
+      ${r.rejected.length ? `<p class="note">Fix these rows in your export and upload the file again. Row numbers count the header as row 1.</p>` : ""}</div></div>`;
+  }
+  if (durable) {
+    const j = st.job, f = (label, k, extra = 'min="1" step="1"', type = "number") => `<label class="field">${label}<input data-job="${k}" type="${type}" value="${esc(j[k])}" ${extra}></label>`;
+    h += `<div class="card noprint"><h2>Next cutting job</h2><p class="mut">Enter the job you are about to cut. It goes straight to Sold before it's cut, which fills the empty space with parts neighbours have already ordered.</p>
+      <div class="ctrl"><span class="lbl">Sheet</span>${f("Length mm", "sheet_length_mm", 'min="200" step="10"')}${f("Width mm", "sheet_width_mm", 'min="200" step="10"')}
+        <label class="field">Thickness mm<select data-job="thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === j.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+        <label class="field">Grade<select data-job="grade">${["E250", "E350"].map(g => `<option ${g === j.grade ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
+      <div class="ctrl"><span class="lbl">Part</span>${f("Part", "part_name", 'style="width:130px"', "text")}${f("Length mm", "part_length_mm", 'min="10" step="10"')}${f("Width mm", "part_width_mm", 'min="10" step="10"')}${f("Quantity", "quantity")}</div>
+      <div class="ctrl"><button class="btn pri" id="jobSend" type="button">Send to Sold before it's cut</button><span id="jobMsg" class="note" aria-live="polite"></span></div>
+      <p class="note">The neighbours' standing orders on the next screen are sample data.</p></div>`;
+  } else h += `<p class="note">Next cutting job applies to sheet cutting, so it lives in the Durable lane.</p>`;
+  el.innerHTML = h;
+
+  $("#impFile", el).onchange = async e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    S.name = file.name;
+    try { S.text = await file.text(); } catch (x) { S.err = new Error("The browser could not read this file. Save it again as CSV and retry."); S.result = null; render(); return; }
+    impPreview(lane);
+  };
+  const n = $("#impN", el), hh = $("#impH", el);
+  if (n) n.onchange = () => { const v = Math.round(+n.value); if (v >= 0) { st.impLimit.days = v; if (S.text) impPreview(lane); else render(); } };
+  if (hh) hh.onchange = () => { const v = +hh.value; if (v >= 0) { st.impLimit.hours = v; if (S.text) impPreview(lane); else render(); } };
+  const meas = $("#impMeas", el); if (meas) meas.onchange = () => { st.impMeasured = meas.checked; render(); };
+  const ts = $("#toStock", el); if (ts) ts.onclick = ev => { ev.preventDefault(); go({view: "stock"}); };
+  const ls = $("#impList", el);
+  if (ls) ls.onclick = async () => {
+    ls.disabled = true;
+    try {
+      S.listed = await api("/api/import/list", {lane, csv_text: S.text, days_unused_limit: st.impLimit.days, hours_left_limit: st.impLimit.hours, measured: st.impMeasured});
+      render();
+    } catch (e) { $("#impMsg", el).innerHTML = `<span class="err">${esc(e.message)}</span>`; ls.disabled = false; }
+  };
+  el.querySelectorAll("[data-job]").forEach(inp => inp.onchange = () => {
+    const k = inp.dataset.job, v = inp.type === "text" || k === "grade" ? inp.value : +inp.value;
+    if (typeof v === "number" && !(v > 0)) return;
+    st.job[k] = v;
+  });
+  const js = $("#jobSend", el);
+  if (js) js.onclick = async () => {
+    js.disabled = true;
+    try {
+      const r2 = await api("/api/import/cutting-job", st.job);
+      st.gf = r2.gapfill; st.gfDeclined = [];
+      go({view: "gapfill"});
+    } catch (e) { $("#jobMsg", el).innerHTML = `<span class="err">${esc(e.message)}</span>`; js.disabled = false; }
+  };
 }
 
 /* ---------------- Seller: Sold before it's cut (Gap Fill) ---------------- */
@@ -300,8 +392,8 @@ async function vOffers(el) {
 /* ---------------- Seller: stock and passports ---------------- */
 async function vStock(el) {
   const k = laneScen(), S = await scen(k), fresh = S.meta.engine === "perishable";
-  let r;
-  try { r = await api(`/api/stock/${k}`); } catch (e) { el.innerHTML = errBox(e); return; }
+  let r, imp;
+  try { [r, imp] = await Promise.all([api(`/api/stock/${k}`), api(`/api/stock/import_${st.lane}`)]); } catch (e) { el.innerHTML = errBox(e); return; }
   let items = r.items.filter(x => !st.sellerFilter || x.seller_id === st.sellerFilter);
   if (fresh) items = items.slice().sort((a, b) => a.hours_left - b.hours_left);
   const maxH = 72;
@@ -313,8 +405,13 @@ async function vStock(el) {
     return `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(url)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td>${fresh ? `<td style="min-width:140px"><div class="bar ${x.hours_left < 12 ? "warn" : "pe"}"><i style="width:${Math.max(3, Math.min(1, x.hours_left / maxH) * 100)}%"></i></div><span class="note">${num(x.hours_left)} h</span></td>` : ""}<td class="n">${num(x.kg, 1)}</td><td class="n">${inr(x.scrap_value)}</td><td>${chip(x.label)}</td></tr>`;
   }).join("")}</table></div>` : `<div class="empty">No stock for this seller.</div>`}
   <p class="note">Each QR opens the item's passport on this computer's address. For phones on the same Wi-Fi, open the app at the laptop's network address (see README) before printing labels.</p></div>`;
+  if (imp.items.length) h = `<div class="card"><div class="ctrl"><h2>Listed from your import (${imp.items.length})</h2><div class="grow"></div><a class="btn" href="/labels/import_${st.lane}" target="_blank" rel="noopener">Print QR labels</a><button class="btn" id="impClear" type="button">Remove imported stock</button></div>
+    <p class="mut">Import from ERP or POS export (CSV). Surplus items listed from Connect your system.</p>
+    <div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th><th>Found by</th><th class="n">kg</th><th class="n">Scrap value</th><th>Data</th></tr>${imp.items.map(x => `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(location.origin + x.passport)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td><td class="n">${num(x.kg, 1)}</td><td class="n">–</td><td>${chip(x.label)}</td></tr>`).join("")}</table></div>
+    <p class="note">No scrap price is shown for imported items until a dated quote is entered.</p></div>` + h;
   el.innerHTML = h;
   bindScen(el);
+  const ic = $("#impClear", el); if (ic) ic.onclick = async () => { await api(`/api/import/clear?lane=${st.lane}`, {}); render(); };
   $("#sf", el).onchange = e => { st.sellerFilter = e.target.value; render(); };
 }
 
@@ -365,7 +462,7 @@ async function vSim(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {connect: vConnect, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();

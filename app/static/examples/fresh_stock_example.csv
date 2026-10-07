@@ -1,0 +1,11 @@
+item_id,seller_id,product,category,quantity_kg,storage,hours_left
+K-01,K,Tomatoes,vegetables,14,ambient,40
+K-02,K,Paneer,dairy,6,chilled,20
+K-03,K,Bread loaves,bakery,8,ambient,10
+K-04,K,Onions,vegetables,25,ambient,120
+K-05,K,Curd,dairy,4,chilled,24
+K-06,K,Cooked rice and dal,cooked_meal,18,chilled,5
+K-07,K,Basmati rice,packaged,30,ambient,2000
+K-08,K,Spinach,leafy_greens,3,chilled,12
+K-09,K,Milk,dairy,10,fridge,8
+K-10,K,Bananas,fruit,,ambient,30
