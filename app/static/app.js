@@ -137,7 +137,10 @@ let SESSION = null;
 const TITLES = {
   ready: ["Ready to send", "WhatsApp alerts CIRCULATE has prepared. Open each one in WhatsApp and press send; nothing goes out by itself."],
   whatsapp: ["WhatsApp alerts", "Register a WhatsApp number and choose the alerts you want. CIRCULATE prepares each message; a person sends it with one click."],
-  connect: ["Connect your system", "Bring in your stock from any ERP or billing software. The app checks every row and finds what is surplus."],
+  add: ["Add stock", "Three ways in: upload, sync, or type it."],
+  "add-csv": ["Upload CSV", "Export your stock list from any ERP, billing software or Excel and upload it. Every row is checked before anything is listed."],
+  "add-sync": ["Auto-sync", "Point CIRCULATE at the folder your ERP exports into. New or changed files are picked up on their own."],
+  "add-manual": ["Manual entry", "No ERP? Type one item, or photograph it, and it gets the same checks as an upload."],
   post: ["Post a requirement", "Say what you need. Find it in sellers' stock today, or keep it open so a workshop can cut it from the spare part of its next sheet."],
   reqs: ["My requirements", "Everything you have posted, and where each one stands."],
   browse: ["Browse surplus", "Pieces and lots on offer near you, each with a fair price range and the seller's distance."],
@@ -171,8 +174,10 @@ function notYours(view) {
   // another role's screen: a quiet note, then your own home (a screen of your own role that needs the other lane just goes home)
   if (view && VIEWS[view] && SESSION && !SESSION.views.includes(view)) toast(`That page is for ${SESSION.owners[view] ? SESSION.owners[view].for : "another role"}.`);
 }
+const OLD_VIEWS = {connect: "add"};  // links to the old combined Connect screen go to Add stock
 function readHash() {
-  const [, view, lane] = location.hash.slice(1).split("/");
+  let [, view, lane] = location.hash.slice(1).split("/");
+  view = OLD_VIEWS[view] || view;
   if (LANES[lane]) st.lane = lane;
   if (view && allowed(view)) st.view = view;
   else { notYours(view); st.view = home(); history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`); }
@@ -180,8 +185,10 @@ function readHash() {
 function go(patch) {
   const {role, ...rest} = patch;  // the role comes from the demo login, never from a link
   Object.assign(st, rest);
+  st.view = OLD_VIEWS[st.view] || st.view;
   if (!allowed(st.view)) { notYours(st.view); st.view = home(); }
-  history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`);
+  const hash = `#${st.role}/${st.view}/${st.lane}`;
+  if (location.hash !== hash) history.pushState(null, "", hash);  // a new entry, so the browser Back button works
   render();
 }
 function shell() {
@@ -213,7 +220,12 @@ document.addEventListener("click", e => {
   if (b.dataset.lane) go({lane: b.dataset.lane});
   else go({view: b.dataset.view});
 });
-window.addEventListener("hashchange", () => { readHash(); render(); });
+window.addEventListener("hashchange", () => {
+  readHash();
+  const h = `#${st.role}/${st.view}/${st.lane}`;
+  if (location.hash !== h) history.replaceState(null, "", h);  // tidy an old or foreign link
+  render();
+});
 /* Each demo business lands on its own data: its lane, its stock, its order. */
 function applySession(S) {
   SESSION = S;
@@ -654,7 +666,7 @@ async function vDeals(el, admin) {
   });
 }
 
-/* ---------------- Seller: connect your system (CSV import and surplus detection) ---------------- */
+/* ---------------- Seller: stock intake helpers (CSV import and surplus detection) ---------------- */
 const IMP_COLS = {
   durable: "item_id, seller_id, material, length_mm, width_mm, thickness_mm, grade, condition, is_full_sheet, days_unused",
   fresh: "item_id, seller_id, product, category, quantity_kg, storage, hours_left",
@@ -678,24 +690,67 @@ function syncLogTable(log) {
     <td class="n">${x.rows_read ?? "–"}</td><td class="n">${x.surplus ?? "–"}</td>
     <td class="n">${x.rejected ? `<details><summary>${x.rejected}</summary><ul class="rej">${x.details.map(d => `<li>Row ${d.row} <code>${esc(d.item_id || "no item_id")}</code> ${esc(d.reason)}</li>`).join("")}</ul></details>` : x.rejected ?? "–"}</td></tr>`).join("")}</table>`;
 }
-async function vConnect(el) {
+/* ---------------- Seller: add stock (four pages: overview, upload CSV, auto-sync, manual entry) ---------------- */
+const ADD_PAGES = {"add-csv": "Upload CSV", "add-sync": "Auto-sync", "add-manual": "Manual entry"};
+/* Breadcrumb "Add stock > page" and a Back button for every sub-page. */
+const addHead = page => `<div class="subhead noprint"><nav class="crumb" aria-label="Breadcrumb"><a href="#${st.role}/add/${st.lane}">Add stock</a>${ic("chevron-right", "sm")}<span aria-current="page">${esc(page)}</span></nav><button class="btn sm" type="button" data-add-back>${ic("chevron-right", "sm flip")}Back</button></div>`;
+const goStockCard = what => `<div class="card gostock"><div class="ctrl"><span class="pill p-ok">${ic("circle-check", "sm")}Done</span><span>${what}</span><div class="grow"></div><button class="btn pri" type="button" data-to-stock>${ic("qr-code", "sm")}Go to My stock</button></div></div>`;
+function bindAdd(el) {
+  el.querySelectorAll("[data-add-back]").forEach(b => b.onclick = () => go({view: "add"}));
+  el.querySelectorAll("[data-to-stock]").forEach(b => b.onclick = () => go({view: "stock"}));
+  el.querySelectorAll("[data-open-add]").forEach(b => b.onclick = () => go({view: b.dataset.openAdd}));
+}
+
+async function vAdd(el) {
+  const lane = st.lane, durable = lane === "durable";
+  const C = await api("/api/connectors");
+  const ways = [["add-csv", "upload", "Upload CSV", "From any ERP, billing software or Excel. Checked row by row before anything is listed."],
+    ["add-sync", "folder-sync", "Auto-sync folder", `Your ERP saves exports into a folder; new or changed files are picked up every ${C.every_seconds} seconds.`],
+    ["add-manual", "keyboard", "Manual entry", "No ERP? Type one item, or photograph it with your phone."]];
+  let h = `<p class="mut">${esc(C.works_with)}</p><section class="addgrid" aria-label="Three ways to add stock">${ways.map(([v, icon, t, d]) => `<div class="card addcard"><span class="rico">${ic(icon, "lg")}</span>
+      <div class="ctrl"><h2>${esc(t)}</h2><span class="pill p-ok">Active</span></div><p class="mut">${esc(d)}</p><div class="grow"></div>
+      <button class="btn pri" type="button" data-open-add="${v}">Open ${ic("arrow-right", "sm")}</button></div>`).join("")}</section>
+    <div class="warow">${ic("plug")}<b>Tally / SAP / POS connectors</b>${C.connectors.filter(c => c.status === "planned").map(c => `<span>${esc(c.name)}: <span class="pill p-mut" title="Shown so you know it is coming. It does not work yet.">Planned</span></span>`).join("")}</div>
+    <div class="warow">${ic("message-circle")}<b>WhatsApp</b><span>Alerts prepared automatically, sent with one click: <span class="pill p-ok">Active</span></span><span>Fully automatic sending (WhatsApp Business API): <span class="pill p-mut" title="Shown so you know it is coming. It does not work yet.">Planned</span></span><button class="btn sm ghost" type="button" data-go-wa>Set up WhatsApp alerts</button></div>`;
+    if (durable) {
+    const j = st.job, f = (label, k, extra = 'min="1" step="1"', type = "number") => `<label class="field">${label}<input data-job="${k}" type="${type}" value="${esc(j[k])}" ${extra}></label>`;
+    h += `<div class="card noprint"><h2>Next cutting job</h2><p class="mut">Enter the job you are about to cut. It goes straight to Sold before it's cut, which fills the empty space with parts neighbours have already ordered.</p>
+      <div class="ctrl"><span class="lbl">Sheet</span>${f("Length mm", "sheet_length_mm", 'min="200" step="10"')}${f("Width mm", "sheet_width_mm", 'min="200" step="10"')}
+        <label class="field">Thickness mm<select data-job="thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === j.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+        <label class="field">Grade<select data-job="grade">${["E250", "E350"].map(g => `<option ${g === j.grade ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
+      <div class="ctrl"><span class="lbl">Part</span>${f("Part", "part_name", 'style="width:130px"', "text")}${f("Length mm", "part_length_mm", 'min="10" step="10"')}${f("Width mm", "part_width_mm", 'min="10" step="10"')}${f("Quantity", "quantity")}</div>
+      <div class="ctrl"><button class="btn pri" id="jobSend" type="button">Send to Sold before it's cut</button><span id="jobMsg" class="note" aria-live="polite"></span></div>
+      <p class="note">The neighbours' standing orders on the next screen are sample data.</p></div>`;
+  } else h += `<p class="note">Next cutting job applies to sheet cutting, so it lives in the Durable lane.</p>`;
+  el.innerHTML = h;
+  bindAdd(el);
+    el.querySelectorAll("[data-job]").forEach(inp => inp.onchange = () => {
+    const k = inp.dataset.job, v = inp.type === "text" || k === "grade" ? inp.value : +inp.value;
+    if (typeof v === "number" && !(v > 0)) return;
+    st.job[k] = v;
+  });
+  const js = $("#jobSend", el);
+  if (js) js.onclick = async () => {
+    js.disabled = true;
+    try {
+      const r2 = await api("/api/import/cutting-job", st.job);
+      st.gf = r2.gapfill; st.gfDeclined = [];
+      go({view: "gapfill"});
+    } catch (e) { $("#jobMsg", el).innerHTML = `<span class="err">${esc(e.message)}</span>`; js.disabled = false; }
+  };
+}
+
+async function vAddCsv(el) {
   const lane = st.lane, S = st.imp[lane], durable = lane === "durable", r = S.result;
-  const [C, L, O] = await Promise.all([api("/api/connectors"), api(`/api/connectors/folder/${lane}/log`), api("/api/manual/options")]), fc = C.folder[lane];
-  const lim = durable ? `<label class="field">Surplus if unused for at least (days)<input id="impN" type="number" min="0" max="36500" step="1" value="${st.impLimit.days}"></label>`
+    const lim = durable ? `<label class="field">Surplus if unused for at least (days)<input id="impN" type="number" min="0" max="36500" step="1" value="${st.impLimit.days}"></label>`
     : `<label class="field">Urgent if use-by within (hours)<input id="impH" type="number" min="0" max="8760" step="1" value="${st.impLimit.hours}"></label>`;
-  let h = `<section class="conns" aria-label="Connectors"><p class="mut">${esc(C.works_with)}</p><div class="conngrid">${C.connectors.map(c => {
-      const on = c.status === "active", inner = `<div class="ctrl"><b>${esc(c.name)}</b><div class="grow"></div><span class="pill ${on ? "p-ok" : "p-mut"}">${on ? "Active" : "Planned"}</span></div><p class="note">${esc(c.description)}</p>`;
-      return on ? `<button type="button" class="conn" data-goto="conn-${esc(c.key)}">${inner}</button>` : `<div class="conn planned" aria-disabled="true">${inner}</div>`;
-    }).join("")}</div>
-    <div class="warow">${ic("message-circle")}<b>WhatsApp</b><span>Alerts prepared automatically, sent with one click: <span class="pill p-ok">Active</span></span><span>Fully automatic sending (WhatsApp Business API): <span class="pill p-mut" title="Shown so you know it is coming. It does not work yet.">Planned</span></span><button class="btn sm ghost" type="button" data-go-wa>Set up WhatsApp alerts</button></div></section>
-    ${manualCard(lane, O)}
-    <div class="card" id="conn-csv_upload"><div class="ctrl"><h2>Import from ERP or POS export (CSV)</h2><div class="grow"></div><a class="btn" href="/api/import/example/${lane}" download>Download example file</a></div>
+  let h = addHead("Upload CSV") + `<div class="card" id="conn-csv_upload"><div class="ctrl"><h2>Import from ERP or POS export (CSV)</h2><div class="grow"></div><a class="btn" href="/api/import/example/${lane}" download>Download example file</a></div>
     <p class="mut">There is no live link to any outside software. Export your ${durable ? "sheet and offcut" : "food"} stock list as a CSV file from the system you use, then upload it here. Nothing is saved until you list items on the marketplace.</p>
     <div class="ctrl"><label class="field">Stock file (CSV)<input id="impFile" type="file" accept=".csv,text/csv"></label>${lim}
       ${S.name ? `<span class="note">Loaded: <b>${esc(S.name)}</b></span>` : ""}</div>
     <p class="note">Columns: <code>${IMP_COLS[lane]}</code>. Extra columns are ignored. The example file has three rows with mistakes, so you can see how rejected rows look.</p>
     <p class="note">Surplus rules: ${durable ? `a piece that is not a full sheet is an offcut; any piece unused for ${num(st.impLimit.days)} days or more is surplus.` : `a lot with ${num(st.impLimit.hours)} hours or less to its use-by is surplus and marked urgent. Food rules are platform rules that still need expert review.`}</p></div>`;
-  if (S.busy) h += `<div class="spin">Checking every row…</div>`;
+    if (S.busy) h += `<div class="spin">Checking every row…</div>`;
   else if (S.err) h += `<div class="err" role="alert"><b>The file could not be read.</b> ${esc(S.err.message)}</div>`;
   else if (!r) h += `<div class="empty">No file yet. Upload a stock export, or download the example file above and upload that.</div>`;
   else {
@@ -709,51 +764,10 @@ async function vConnect(el) {
       <div class="card"><h2>Rejected rows (${r.rejected.length})</h2><ul class="rej">${r.rejected.map(x => `<li>Row ${x.row} <code>${esc(x.item_id || "no item_id")}</code> ${esc(x.reason)}</li>`).join("") || "<li>None. Every row passed the checks.</li>"}</ul>
       ${r.rejected.length ? `<p class="note">Fix these rows in your export and upload the file again. Row numbers count the header as row 1.</p>` : ""}</div></div>`;
   }
-  h += `<div class="card" id="conn-folder_sync"><div class="ctrl"><h2>Auto-sync folder</h2>${fc.enabled ? `<span class="pill p-ok">On · every ${C.every_seconds} s</span>` : '<span class="pill p-mut">Off</span>'}<div class="grow"></div><button class="btn" id="fsSync" type="button">Sync now</button></div>
-    <p class="mut">Save ${durable ? "sheet and offcut" : "food"} stock exports (.csv) into a folder on this computer. Each new or changed file goes through the same row checks and surplus rules as an upload, and its surplus is listed with passports and QR codes. Files are only read: never moved, changed or deleted. An unchanged file is never imported twice.</p>
-    <div class="ctrl"><label class="field fspath">Folder on this computer (${durable ? "Durable" : "Fresh"} lane)<input id="fsPath" type="text" spellcheck="false" value="${esc(fc.path)}"></label></div>
-    <div class="ctrl"><label class="check"><input type="checkbox" id="fsOn" ${fc.enabled ? "checked" : ""}> Check every ${C.every_seconds} seconds</label><label class="check"><input type="checkbox" id="fsMeas" ${fc.measured ? "checked" : ""}> These are measured values</label><button class="btn pri" id="fsSave" type="button">Save folder settings</button><span id="fsMsg" class="note" aria-live="polite"></span></div>
-    <p class="note">${fc.saved ? `Saved rules: ${durable ? `offcuts, and pieces unused for ${num(fc.days_unused_limit)} days or more` : `lots with ${num(fc.hours_left_limit)} hours or less to use-by`}. Saving takes the surplus rule set above.` : `Not saved yet. Default folder: <code>${esc(fc.default_path)}</code>.`} Imported surplus is listed as ${fc.measured ? "Measured" : "Sample"}.</p>
-    <h4>Sync log</h4><div class="scroll" id="fsLog">${syncLogTable(L.log)}</div></div>`;
-  if (durable) {
-    const j = st.job, f = (label, k, extra = 'min="1" step="1"', type = "number") => `<label class="field">${label}<input data-job="${k}" type="${type}" value="${esc(j[k])}" ${extra}></label>`;
-    h += `<div class="card noprint"><h2>Next cutting job</h2><p class="mut">Enter the job you are about to cut. It goes straight to Sold before it's cut, which fills the empty space with parts neighbours have already ordered.</p>
-      <div class="ctrl"><span class="lbl">Sheet</span>${f("Length mm", "sheet_length_mm", 'min="200" step="10"')}${f("Width mm", "sheet_width_mm", 'min="200" step="10"')}
-        <label class="field">Thickness mm<select data-job="thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === j.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
-        <label class="field">Grade<select data-job="grade">${["E250", "E350"].map(g => `<option ${g === j.grade ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
-      <div class="ctrl"><span class="lbl">Part</span>${f("Part", "part_name", 'style="width:130px"', "text")}${f("Length mm", "part_length_mm", 'min="10" step="10"')}${f("Width mm", "part_width_mm", 'min="10" step="10"')}${f("Quantity", "quantity")}</div>
-      <div class="ctrl"><button class="btn pri" id="jobSend" type="button">Send to Sold before it's cut</button><span id="jobMsg" class="note" aria-live="polite"></span></div>
-      <p class="note">The neighbours' standing orders on the next screen are sample data.</p></div>`;
-  } else h += `<p class="note">Next cutting job applies to sheet cutting, so it lives in the Durable lane.</p>`;
+  if (S.listed) h += goStockCard(`${S.listed.listed} item(s) listed as ${esc(S.listed.label)}. Passports and QR codes are ready.`);
   el.innerHTML = h;
-
-  bindManual(el, lane);
-  el.querySelectorAll("[data-goto]").forEach(b => b.onclick = () => { const t = document.getElementById(b.dataset.goto); if (t) t.scrollIntoView({behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start"}); });
-  const fsMsg = t => { $("#fsMsg", el).innerHTML = t; };
-  $("#fsSave", el).onclick = async () => {
-    try {
-      await api(`/api/connectors/folder/${lane}`, undefined, "PUT", {path: $("#fsPath", el).value, enabled: $("#fsOn", el).checked, measured: $("#fsMeas", el).checked,
-        days_unused_limit: st.impLimit.days, hours_left_limit: st.impLimit.hours});
-      render();
-    } catch (e) { fsMsg(`<span class="err">${esc(e.message)}</span>`); }
-  };
-  $("#fsSync", el).onclick = async () => {
-    const b = $("#fsSync", el); b.disabled = true; fsMsg("Checking the folder…");
-    try {
-      const res = await api(`/api/connectors/folder/${lane}/sync`, {});
-      $("#fsLog", el).innerHTML = syncLogTable(res.log);
-      const ok = res.entries.filter(x => x.status === "imported").length, bad = res.entries.length - ok;
-      fsMsg(res.entries.length ? `${ok} file(s) imported${bad ? `, ${bad} could not be imported (see the log)` : ""}.` : "No new or changed files.");
-    } catch (e) { fsMsg(`<span class="err">${esc(e.message)}</span>`); }
-    b.disabled = false;
-  };
-  clearInterval(st.fsTimer);
-  if (fc.enabled) st.fsTimer = setInterval(async () => {
-    if (st.view !== "connect" || st.lane !== lane || !document.body.contains(el)) { clearInterval(st.fsTimer); return; }
-    try { const x = await api(`/api/connectors/folder/${lane}/log`); const box = $("#fsLog", el); if (box) box.innerHTML = syncLogTable(x.log); } catch (e) { /* keep the last log on screen */ }
-  }, 20000);
-
-  $("#impFile", el).onchange = async e => {
+  bindAdd(el);
+    $("#impFile", el).onchange = async e => {
     const file = e.target.files[0];
     if (!file) return;
     S.name = file.name;
@@ -773,20 +787,57 @@ async function vConnect(el) {
       render();
     } catch (e) { $("#impMsg", el).innerHTML = `<span class="err">${esc(e.message)}</span>`; ls.disabled = false; }
   };
-  el.querySelectorAll("[data-job]").forEach(inp => inp.onchange = () => {
-    const k = inp.dataset.job, v = inp.type === "text" || k === "grade" ? inp.value : +inp.value;
-    if (typeof v === "number" && !(v > 0)) return;
-    st.job[k] = v;
-  });
-  const js = $("#jobSend", el);
-  if (js) js.onclick = async () => {
-    js.disabled = true;
+}
+
+async function vAddSync(el) {
+  const lane = st.lane, durable = lane === "durable";
+  const [C, L] = await Promise.all([api("/api/connectors"), api(`/api/connectors/folder/${lane}/log`)]), fc = C.folder[lane];
+  const checked = l => st.fsChecked && st.fsChecked[l] ? `Checked ${st.fsChecked[l].toLocaleTimeString("en-IN", {hour: "2-digit", minute: "2-digit"})}` : "Not checked in this session";
+  const picked = log => log.filter(x => x.status === "imported").length;
+  let h = addHead("Auto-sync") + `<div class="card"><h2>Status</h2><div class="scroll"><table><tr><th>Lane</th><th>Folder on this computer</th><th>Status</th><th>Last check</th><th class="n">Files picked up</th></tr>${["durable", "fresh"].map(l => `<tr ${l === lane ? 'class="sel"' : ""}><td><b>${cap1(l)}</b></td><td class="w"><code>${esc(C.folder[l].path)}</code></td>
+      <td>${C.folder[l].enabled ? `<span class="pill p-ok">On · every ${C.every_seconds} s</span>` : '<span class="pill p-mut">Off</span>'}</td><td>${esc(checked(l))}${C.folder[l].last ? `<div class="note">Last file picked up ${esc(new Date(C.folder[l].last.at).toLocaleString("en-IN", {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"}))}</div>` : ""}</td>
+      <td class="n">${l === lane ? picked(L.log) : (C.folder[l].last ? "see lane" : 0)}</td></tr>`).join("")}</table></div>
+    <p class="note">Duplicates are skipped for you: a file that has not changed since it was last picked up is never imported twice. Switch the Durable / Fresh lane at the top to set up the other folder.</p></div>`;
+  h += `<div class="card" id="conn-folder_sync"><div class="ctrl"><h2>Auto-sync folder</h2>${fc.enabled ? `<span class="pill p-ok">On · every ${C.every_seconds} s</span>` : '<span class="pill p-mut">Off</span>'}<div class="grow"></div><button class="btn" id="fsSync" type="button">Check now</button></div>
+    <p class="mut">Save ${durable ? "sheet and offcut" : "food"} stock exports (.csv) into a folder on this computer. Each new or changed file goes through the same row checks and surplus rules as an upload, and its surplus is listed with passports and QR codes. Files are only read: never moved, changed or deleted. An unchanged file is never imported twice.</p>
+    <div class="ctrl"><label class="field fspath">Folder on this computer (${durable ? "Durable" : "Fresh"} lane)<input id="fsPath" type="text" spellcheck="false" value="${esc(fc.path)}"></label></div>
+    <div class="ctrl"><label class="check"><input type="checkbox" id="fsOn" ${fc.enabled ? "checked" : ""}> Check every ${C.every_seconds} seconds</label><label class="check"><input type="checkbox" id="fsMeas" ${fc.measured ? "checked" : ""}> These are measured values</label><button class="btn pri" id="fsSave" type="button">Save folder settings</button><span id="fsMsg" class="note" aria-live="polite"></span></div>
+    <p class="note">${fc.saved ? `Saved rules: ${durable ? `offcuts, and pieces unused for ${num(fc.days_unused_limit)} days or more` : `lots with ${num(fc.hours_left_limit)} hours or less to use-by`}. Saving takes the surplus rule set above.` : `Not saved yet. Default folder: <code>${esc(fc.default_path)}</code>.`} Imported surplus is listed as ${fc.measured ? "Measured" : "Sample"}.</p>
+    <h4>Sync log</h4><div class="scroll" id="fsLog">${syncLogTable(L.log)}</div></div>`;
+  el.innerHTML = h;
+  bindAdd(el);
+  el.addEventListener("click", e => { if (e.target.closest("[data-to-stock]")) go({view: "stock"}); });
+    const fsMsg = t => { $("#fsMsg", el).innerHTML = t; };
+  $("#fsSave", el).onclick = async () => {
     try {
-      const r2 = await api("/api/import/cutting-job", st.job);
-      st.gf = r2.gapfill; st.gfDeclined = [];
-      go({view: "gapfill"});
-    } catch (e) { $("#jobMsg", el).innerHTML = `<span class="err">${esc(e.message)}</span>`; js.disabled = false; }
+      await api(`/api/connectors/folder/${lane}`, undefined, "PUT", {path: $("#fsPath", el).value, enabled: $("#fsOn", el).checked, measured: $("#fsMeas", el).checked,
+        days_unused_limit: st.impLimit.days, hours_left_limit: st.impLimit.hours});
+      render();
+    } catch (e) { fsMsg(`<span class="err">${esc(e.message)}</span>`); }
   };
+  $("#fsSync", el).onclick = async () => {
+    const b = $("#fsSync", el); b.disabled = true; fsMsg("Checking the folder…");
+    try {
+      const res = await api(`/api/connectors/folder/${lane}/sync`, {});
+      $("#fsLog", el).innerHTML = syncLogTable(res.log);
+      const ok = res.entries.filter(x => x.status === "imported").length, bad = res.entries.length - ok;
+      (st.fsChecked = st.fsChecked || {})[lane] = new Date();
+      fsMsg(res.entries.length ? `${ok} file(s) imported${bad ? `, ${bad} could not be imported (see the log)` : ""}. ${ok ? '<button class="btn pri sm" type="button" data-to-stock>Go to My stock</button>' : ""}` : "No new or changed files. Unchanged files are skipped, never imported twice.");
+    } catch (e) { fsMsg(`<span class="err">${esc(e.message)}</span>`); }
+    b.disabled = false;
+  };
+  clearInterval(st.fsTimer);
+  if (fc.enabled) st.fsTimer = setInterval(async () => {
+    if (st.view !== "add-sync" || st.lane !== lane || !document.body.contains(el)) { clearInterval(st.fsTimer); return; }
+    try { const x = await api(`/api/connectors/folder/${lane}/log`); const box = $("#fsLog", el); if (box) box.innerHTML = syncLogTable(x.log); } catch (e) { /* keep the last log on screen */ }
+  }, 20000);
+}
+
+async function vAddManual(el) {
+  const lane = st.lane, O = await api("/api/manual/options");
+  el.innerHTML = addHead("Manual entry") + manualCard(lane, O);
+  bindAdd(el);
+  bindManual(el, lane);
 }
 
 /* ---------------- Seller: add an item by hand (manual entry) ---------------- */
@@ -828,7 +879,7 @@ function manualCard(lane, O) {
   ];
   let res = "";
   if (R && R.listed) res = `<div class="mres ok" role="status"><b>${R.surplus ? "Found as surplus" : "Listed by the seller"}</b><p>${R.surplus ? `Caught by: ${R.rules.map(esc).join("; ")}.` : `No surplus rule caught it (${esc(R.kept_reason)}), so it is listed with the rule "Listed by the seller".`} Listed as ${esc(cap1(R.label))}${R.photo ? ", with your photo" : ""}.</p>
-      <div class="ctrl"><a class="btn sm" href="${esc(R.passport)}" target="_blank" rel="noopener">Open passport and QR code</a><button class="btn sm" type="button" id="manToBrowse">See it in Browse surplus</button></div></div>`;
+      <div class="ctrl"><a class="btn sm" href="${esc(R.passport)}" target="_blank" rel="noopener">Open passport and QR code</a><button class="btn pri sm" type="button" data-to-stock>Go to My stock</button><button class="btn sm" type="button" id="manToBrowse">See it in Browse surplus</button></div></div>`;
   else if (R) res = `<div class="mres warn" role="status"><b>Not surplus</b><p>${esc(R.kept_reason)}. It stays as working stock and is not listed.</p><div class="ctrl"><button class="btn pri" type="button" id="manAnyway">List it anyway</button><span class="note">It will carry the rule "Listed by the seller".</span></div></div>`;
   return `<div class="card manual" id="conn-manual"><div class="ctrl"><h2>Add an item by hand</h2><span class="pill p-ok">Manual entry</span></div>
     <p class="mut">No ERP? Add one ${durable ? "piece" : "lot"} here. It gets the same checks and surplus rules as an uploaded file, and a passport with a QR code if it is listed.</p>
@@ -1285,7 +1336,7 @@ async function vUsers(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {users: vUsers, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {users: vUsers, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, add: vAdd, "add-csv": vAddCsv, "add-sync": vAddSync, "add-manual": vAddManual, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();

@@ -1979,10 +1979,12 @@ SESSION_COOKIE = "circulate_session"
 ROLE_NAMES = {"seller": "Seller", "buyer": "Buyer", "admin": "Admin"}
 ROLE_FOR = {"seller": "sellers", "buyer": "buyers", "admin": "the CIRCULATE team"}
 DEMO_PHONE, DEMO_PIN = "98765 43210", "1234"
+ADD_STOCK_GROUP = ("Add stock", [("add", "Add stock", "plus", None), ("add-csv", "Upload CSV", "upload", None),
+                                 ("add-sync", "Auto-sync", "folder-sync", None), ("add-manual", "Manual entry", "keyboard", None)])
 # Each role's left rail: (group, [(view, label, icon, lane or None)]). The first item that fits the lane is the role's home.
 ROLE_MENUS = {
-    "seller": [("My workshop", [("gapfill", "Sold before it's cut", "scissors", "durable"), ("stock", "My stock and passports", "qr-code", None),
-                                ("connect", "Add stock", "plug", None)]),
+    "seller": [("My workshop", [("gapfill", "Sold before it's cut", "scissors", "durable"), ("stock", "My stock and passports", "qr-code", None)]),
+               ADD_STOCK_GROUP,
                ("Orders", [("deals", "Deals", "receipt", None), ("pickup", "Pickups", "truck", None)]),
                ("Alerts", [("whatsapp", "WhatsApp alerts", "message-circle", None)])],
     "buyer": [("Marketplace", [("browse", "Browse surplus", "search", None), ("post", "Post a requirement", "file-plus-2", None),
@@ -1990,7 +1992,8 @@ ROLE_MENUS = {
               ("Orders", [("pickup", "Deliveries", "truck", None)]),
               ("Alerts", [("whatsapp", "WhatsApp alerts", "message-circle", None)])],
     "admin": [("Seller screens", [("gapfill", "Sold before it's cut", "scissors", "durable"), ("stock", "Stock and passports", "qr-code", None),
-                                  ("connect", "Add stock", "plug", None), ("offers", "Offers and recovery plan", "route", None)]),
+                                  ("offers", "Offers and recovery plan", "route", None)]),
+              ADD_STOCK_GROUP,
               ("Buyer screens", [("browse", "Browse surplus", "search", None), ("post", "Post a requirement", "file-plus-2", None),
                                  ("reqs", "My requirements", "clipboard-list", None), ("match", "Order and match", "layers", None)]),
               ("Deals", [("monitor", "Deal monitor", "gauge", None), ("deals", "Deals", "receipt", None), ("pickup", "Pickups and deliveries", "truck", None)]),
@@ -2218,3 +2221,36 @@ document.querySelectorAll(".acct").forEach(b => b.onclick = () => signIn(b.datas
 document.getElementById("pf").onsubmit = ev => {{ ev.preventDefault(); signIn(FIRST); }};
 </script>"""
     return _entry_page(f"{ROLE_NAMES[role]} login · CIRCULATE", body)
+
+
+# ---------------- Add stock: direct links to the four pages ----------------
+ADD_PAGES = {"": "add", "/csv": "add-csv", "/sync": "add-sync", "/manual": "add-manual"}
+
+
+def _add_redirect(request: Request, tail: str) -> RedirectResponse:
+    """/seller/add, /seller/add/csv, /seller/add/sync and /seller/add/manual open the page inside the app.
+    Anyone who is not a seller (or the admin) is sent to their own home; no session goes to the start page."""
+    sess = _session(request)
+    if sess is None:
+        return RedirectResponse("/", status_code=307)
+    a = sess["view"] or sess["real"]
+    if a["role"] == "buyer":
+        return RedirectResponse("/app", status_code=307)
+    return RedirectResponse(f"/app#{a['role']}/{ADD_PAGES[tail]}/{a['lane']}", status_code=307)
+
+
+@app.get("/seller/add")
+def seller_add(request: Request):
+    return _add_redirect(request, "")
+
+
+@app.get("/seller/add/{page}")
+def seller_add_page(page: str, request: Request):
+    if "/" + page not in ADD_PAGES:
+        raise HTTPException(404, "There is no such Add stock page. Use csv, sync or manual.")
+    return _add_redirect(request, "/" + page)
+
+
+@app.get("/seller/connect")
+def seller_connect_old(request: Request):
+    return _add_redirect(request, "")  # the old combined Connect screen

@@ -526,3 +526,14 @@ body.entry{min-height:100vh;display:flex;background:var(--bg)}
 }
 main.entry-main>.entry-head{flex-direction:row;max-width:none;justify-content:center;gap:var(--s2)}
 .entry-cont{text-align:center}
+
+/* ---------- add stock pages ---------- */
+.subhead{display:flex;align-items:center;gap:var(--s2);flex-wrap:wrap;justify-content:space-between}
+.crumb{display:flex;align-items:center;gap:6px;color:var(--mut);font-size:var(--fs-14)}
+.crumb a{color:var(--np);font-weight:500}.crumb [aria-current]{color:var(--fg);font-weight:600}
+.ic.flip{transform:rotate(180deg)}
+.addgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:var(--s3)}
+.addcard{gap:12px}.addcard .rico{width:48px;height:48px;border-radius:12px;display:flex;align-items:center;justify-content:center;background:var(--np-soft);color:var(--np)}
+.addcard .btn{align-self:flex-start}.addcard p{min-height:3em}
+.gostock{border-color:var(--ok)}
+@media(max-width:1100px){.addgrid{grid-template-columns:minmax(0,1fr)}}

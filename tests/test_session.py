@@ -3,7 +3,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 
-SELLER = {"gapfill", "stock", "connect", "deals", "pickup", "whatsapp"}
+SELLER = {"gapfill", "stock", "add", "add-csv", "add-sync", "add-manual", "deals", "pickup", "whatsapp"}
 BUYER = {"browse", "post", "reqs", "match", "pickup", "whatsapp"}
 
 
