@@ -1203,7 +1203,7 @@ async function vWhatsapp(el) {
     <div class="actions"><button class="btn pri" type="submit">${ic(edit ? "circle-check" : "plus")}${edit ? "Save changes" : "Register this number"}</button>${edit ? `<button class="btn" type="button" id="waCancel">Cancel</button>` : ""}
       <p class="note">A 10-digit number gets India's code 91. Alerts are prepared in CIRCULATE; a person opens each one in WhatsApp and presses send. Nothing is sent automatically.</p></div></form>`;
   const row = c => `<div class="wa-row ${c.active ? "" : "paused"}"><span class="wa-ic">${ic("message-circle")}</span>
-      <div class="nm"><b>${esc(c.name)}</b> <span class="pill ${c.role === "seller" ? "p-np" : c.role === "food bank" ? "p-pe" : "p-mut"}">${esc(c.role)}</span>${c.active ? "" : ' <span class="pill p-warn">Paused</span>'}
+      <div class="nm"><span class="ctrl" style="gap:6px"><b>${esc(c.name)}</b><span class="pill ${c.role === "seller" ? "p-np" : c.role === "food bank" ? "p-pe" : "p-mut"}">${esc(c.role)}</span>${c.active ? "" : '<span class="pill p-warn">Paused</span>'}</span>
         <span class="note">${esc(c.business)} · <span class="num">${esc(c.phone)}</span></span>
         <span class="note">${c.alerts.map(a => esc(R.alert_types[a])).join(" · ")}</span></div>
       <div class="ctrl"><button class="btn sm" type="button" data-wa-edit="${c.id}">${ic("pencil", "sm")}Edit</button><button class="btn sm" type="button" data-wa-toggle="${c.id}" data-active="${c.active ? 1 : 0}">${ic(c.active ? "pause" : "play", "sm")}${c.active ? "Pause" : "Resume"}</button><button class="btn sm ghost" type="button" data-wa-remove="${c.id}">${ic("trash-2", "sm")}Remove</button></div></div>`;

@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import urllib.parse
 
-MAX_CHARS = 400
+MAX_CHARS = 399  # strictly under 400
 FOOD_NOTE = "Food rules need expert review."
 _EMOJI = re.compile("[\U00010000-\U0010FFFF☀-➿️‍]")
 
@@ -110,14 +110,14 @@ def delivered(deal: dict) -> str:
 
 def fresh_expiring(item: dict) -> str:
     """item: {seller_name, product, quantity_kg, storage, hours_left, pickup_by, link, label}"""
-    body = (f"{item['seller_name']}: {item['product']}, {_n(item['quantity_kg'])} kg, {item['storage']}, "
-            f"{_n(item['hours_left'])} h of shelf life left. Pick up by {item['pickup_by']}. {FOOD_NOTE}")
-    if len(_compose(body, item.get("link", ""), item.get("label"))) > MAX_CHARS:  # never cut the food-rules line
-        short = (f"{item['seller_name']}: {item['product']}, {_n(item['quantity_kg'])} kg, {item['storage']}, "
-                 f"{_n(item['hours_left'])} h left. Pick up by {item['pickup_by']}.")
-        room = MAX_CHARS - len(f" {FOOD_NOTE} Details: {item.get('link', '')} | {label_line(item.get('label'))}")
-        body = _clean(short)[: max(0, room - 3)] + "... " + FOOD_NOTE if len(_clean(short)) > room else short + " " + FOOD_NOTE
-    return _compose(body, item.get("link", ""), item.get("label"))
+    facts = (f"{item['seller_name']}: {item['product']}, {_n(item['quantity_kg'])} kg, {item['storage']}, "
+             f"{_n(item['hours_left'])} h of shelf life left. Pick up by {item['pickup_by']}.")
+    link, label = item.get("link", ""), item.get("label")
+    tail = f" {FOOD_NOTE} Details: {link} | {label_line(label)}" if link else f" {FOOD_NOTE} | {label_line(label)}"
+    facts, room = _clean(facts), MAX_CHARS - len(tail)
+    if len(facts) > room:  # shorten the facts, never the food-rules line, the link or the label
+        facts = facts[: max(0, room - 3)].rstrip(" ,.;:") + "..."
+    return facts + tail
 
 
 def offcut_share(item: dict, passport_url: str) -> str:

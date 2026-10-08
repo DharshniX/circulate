@@ -474,3 +474,4 @@ input[type=date]{font-family:var(--mono)}
 .warow b{color:var(--fg)}.warow .ic{color:var(--mut)}.warow .btn{margin-left:auto}
 .toast .btn{margin-left:var(--s1);background:transparent;color:inherit;border-color:currentColor}
 @media(max-width:860px){.wa-head{grid-template-columns:40px minmax(0,1fr)}.wa-head>.ctrl{grid-column:1/-1}.wa-act .btn{flex:1 1 auto}.wa-act .note{flex-basis:100%}.wa-card{padding:var(--s2)}}
+.qrbox .num{overflow-wrap:anywhere}
