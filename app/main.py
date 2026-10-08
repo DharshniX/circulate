@@ -165,7 +165,11 @@ def app_page(request: Request):
     """The app itself. Without a demo session you are sent to the start page."""
     if _session(request) is None:
         return RedirectResponse("/", status_code=307)
-    return FileResponse(ROOT / "static" / "app.html")
+    html = (ROOT / "static" / "app.html").read_text(encoding="utf-8")
+    stamp = int(max((ROOT / "static" / f).stat().st_mtime for f in ("app.js", "app.css")))
+    # a version on the script and style links, so a browser never mixes an old cached app.js with a new page
+    html = html.replace("/static/app.js", f"/static/app.js?v={stamp}").replace("/static/app.css", f"/static/app.css?v={stamp}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/legacy")

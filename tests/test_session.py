@@ -106,3 +106,20 @@ def test_public_pages_still_work_without_a_session():
     assert c.get("/passport/steel/A1").status_code == 200  # QR codes on labels open without a login
     assert c.get("/register").status_code == 200
     assert c.get("/api/browse/durable").status_code == 200  # no API authentication in this prototype
+
+
+def test_each_business_works_in_its_own_lane_only():
+    for role, bid, lane in (("seller", "steel:A", "durable"), ("seller", "food:H", "fresh"), ("buyer", "steel:W", "durable"), ("buyer", "food:N", "fresh")):
+        c = client(role, bid)
+        assert c.get("/api/session").json()["lane"] == lane
+    js = (main_root() / "static" / "app.js").read_text(encoding="utf-8")
+    assert "laneLocked" in js and "st.lane = SESSION.lane" in js  # a link to the other lane is quietly replaced
+    admin = client("admin", "admin")
+    assert admin.post("/api/session/view-as", json={"business_id": "food:H"}).json()["lane"] == "fresh"  # View as uses that business's lane
+    page = admin.get("/app").text
+    assert "app.js?v=" in page  # versioned, so a stale cached script is never mixed with a new page
+
+
+def main_root():
+    import app.main as m
+    return m.ROOT

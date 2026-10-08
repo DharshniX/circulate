@@ -169,6 +169,8 @@ const st = {lane: "durable", role: "seller", view: "", scen: {durable: "steel", 
 
 function navFor(role, lane) { return NAV[role].flatMap(([, items]) => items).filter(n => !n[3] || n[3] === lane); }
 const home = () => navFor(st.role, st.lane)[0][0];
+// A seller or buyer (including the admin "viewing as" one) always works in their own business's lane; only the admin chooses.
+const laneLocked = () => !!SESSION && SESSION.role !== "admin";
 const allowed = view => view === "ready" || navFor(st.role, st.lane).some(n => n[0] === view);
 function notYours(view) {
   // another role's screen: a quiet note, then your own home (a screen of your own role that needs the other lane just goes home)
@@ -178,13 +180,15 @@ const OLD_VIEWS = {connect: "add"};  // links to the old combined Connect screen
 function readHash() {
   let [, view, lane] = location.hash.slice(1).split("/");
   view = OLD_VIEWS[view] || view;
-  if (LANES[lane]) st.lane = lane;
+  if (LANES[lane] && !laneLocked()) st.lane = lane;
+  if (laneLocked()) st.lane = SESSION.lane;  // another lane in the link: quietly use your own
   if (view && allowed(view)) st.view = view;
   else { notYours(view); st.view = home(); history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`); }
 }
 function go(patch) {
   const {role, ...rest} = patch;  // the role comes from the demo login, never from a link
   Object.assign(st, rest);
+  if (laneLocked()) st.lane = SESSION.lane;
   st.view = OLD_VIEWS[st.view] || st.view;
   if (!allowed(st.view)) { notYours(st.view); st.view = home(); }
   const hash = `#${st.role}/${st.view}/${st.lane}`;
@@ -193,6 +197,7 @@ function go(patch) {
 }
 function shell() {
   const S = SESSION;
+  $("#lane").parentElement.hidden = laneLocked();
   $("#lane").className = "seg " + LANES[st.lane].cls;
   $("#lane").innerHTML = Object.entries(LANES).map(([k, v]) => `<button type="button" data-lane="${k}" aria-pressed="${k === st.lane}">${v.name}</button>`).join("");
   $("#who").innerHTML = `<span class="who-av" aria-hidden="true">${esc(S.initial)}</span><span class="who-t"><b title="${esc(S.business_name)}">${esc(S.short_name)}</b><span class="pill role-${S.role}">${esc(S.role_name)}</span></span>`
