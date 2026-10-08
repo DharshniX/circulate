@@ -154,8 +154,17 @@ def _bad(e: Exception):
     raise HTTPException(status_code=422, detail=str(e))
 
 
-@app.get("/")
-def index():
+@app.get("/", response_class=HTMLResponse)
+def index(request: Request):
+    """The start page: choose seller, buyer or admin, then a demo login."""
+    return _start_page(_session(request))
+
+
+@app.get("/app")
+def app_page(request: Request):
+    """The app itself. Without a demo session you are sent to the start page."""
+    if _session(request) is None:
+        return RedirectResponse("/", status_code=307)
     return FileResponse(ROOT / "static" / "app.html")
 
 
@@ -1959,3 +1968,253 @@ f.onsubmit=async ev=>{{ev.preventDefault();document.querySelectorAll(".err").for
            "button{margin-top:14px;width:100%;padding:12px;font-size:16px;background:#f2a33a;border-color:#f2a33a;color:#1f1400}"
            ".err{color:#b0281c;font-size:13px;display:block}.err:empty{display:none}")
     return _PAGE.format(title="WhatsApp alerts", body=body).replace("</style>", css + "</style>")
+
+
+# ---------------- Demo logins: separate entry for seller, buyer and admin ----------------
+# A demo login only picks whose screens and data you see. There are no passwords, nothing secret is stored,
+# and the APIs stay open (no API authentication) by design: this is a prototype.
+import functools
+
+SESSION_COOKIE = "circulate_session"
+ROLE_NAMES = {"seller": "Seller", "buyer": "Buyer", "admin": "Admin"}
+ROLE_FOR = {"seller": "sellers", "buyer": "buyers", "admin": "the CIRCULATE team"}
+DEMO_PHONE, DEMO_PIN = "98765 43210", "1234"
+# Each role's left rail: (group, [(view, label, icon, lane or None)]). The first item that fits the lane is the role's home.
+ROLE_MENUS = {
+    "seller": [("My workshop", [("gapfill", "Sold before it's cut", "scissors", "durable"), ("stock", "My stock and passports", "qr-code", None),
+                                ("connect", "Add stock", "plug", None)]),
+               ("Orders", [("deals", "Deals", "receipt", None), ("pickup", "Pickups", "truck", None)]),
+               ("Alerts", [("whatsapp", "WhatsApp alerts", "message-circle", None)])],
+    "buyer": [("Marketplace", [("browse", "Browse surplus", "search", None), ("post", "Post a requirement", "file-plus-2", None),
+                               ("reqs", "My requirements", "clipboard-list", None), ("match", "Order and match", "layers", None)]),
+              ("Orders", [("pickup", "Deliveries", "truck", None)]),
+              ("Alerts", [("whatsapp", "WhatsApp alerts", "message-circle", None)])],
+    "admin": [("Seller screens", [("gapfill", "Sold before it's cut", "scissors", "durable"), ("stock", "Stock and passports", "qr-code", None),
+                                  ("connect", "Add stock", "plug", None), ("offers", "Offers and recovery plan", "route", None)]),
+              ("Buyer screens", [("browse", "Browse surplus", "search", None), ("post", "Post a requirement", "file-plus-2", None),
+                                 ("reqs", "My requirements", "clipboard-list", None), ("match", "Order and match", "layers", None)]),
+              ("Deals", [("monitor", "Deal monitor", "gauge", None), ("deals", "Deals", "receipt", None), ("pickup", "Pickups and deliveries", "truck", None)]),
+              ("Platform", [("quality", "Data quality", "shield-check", None), ("sim", "Simulation lab", "flask-conical", None),
+                            ("prices", "Price references", "banknote", None), ("rules", "Rules", "list-checks", None), ("users", "All users", "users", None)]),
+              ("Alerts", [("ready", "Ready to send", "send", None), ("whatsapp", "WhatsApp alerts", "message-circle", None)])],
+}
+EVERY_ROLE_VIEWS = ["ready"]  # the bell opens "Ready to send" in every role
+
+
+@functools.lru_cache(maxsize=1)
+def _demo_accounts() -> dict:
+    """Demo businesses, using the ids already in engine/scenarios.py (as scenario:id, because ids repeat across scenarios)."""
+    out = {}
+
+    def seller(key, sid):
+        x = next(v for v in SC.dataset(key)["sellers"] if v.id == sid)
+        lane = "fresh" if SC.SCENARIOS[key]["engine"] == "perishable" else "durable"
+        out[f"{key}:{sid}"] = {"business_id": f"{key}:{sid}", "role": "seller", "name": x.name, "scenario": key, "seller_id": sid,
+                               "lane": lane, "contact_role": "seller"}
+
+    def buyer(key, bid):
+        x = next(v for v in SC.dataset(key)["demands"] if v.buyer_id == bid)
+        lane = "fresh" if SC.SCENARIOS[key]["engine"] == "perishable" else "durable"
+        ngo = getattr(x, "buyer_type", "") == "ngo"
+        out[f"{key}:{bid}"] = {"business_id": f"{key}:{bid}", "role": "buyer", "name": x.buyer_name, "scenario": key, "buyer_id": bid,
+                               "demand_id": x.id, "lane": lane, "contact_role": "food bank" if ngo else "buyer",
+                               "buyer_type": "food_bank" if ngo else ("hostel" if "hostel" in x.buyer_name.lower() else "business")}
+    seller("steel", "A")
+    seller("food", "H")
+    buyer("steel", "W")
+    buyer("food", "M")
+    buyer("food", "N")
+    out["admin"] = {"business_id": "admin", "role": "admin", "name": "CIRCULATE Admin", "lane": "durable", "area": "CIRCULATE team"}
+    for a in out.values():
+        a.setdefault("area", a["name"].split(", ", 1)[1] if ", " in a["name"] else "")
+        a["short_name"] = a["name"].split(", ")[0]
+        a["initial"] = a["short_name"][0].upper()
+    return out
+
+
+def _menu(role: str) -> list[dict]:
+    return [{"group": g, "items": [{"view": v, "label": lab, "icon": icon, "lane": lane} for v, lab, icon, lane in items]}
+            for g, items in ROLE_MENUS[role]]
+
+
+def _views(role: str) -> list[str]:
+    return [v for _, items in ROLE_MENUS[role] for v, *_ in items] + EVERY_ROLE_VIEWS
+
+
+def _owner(view: str) -> str:
+    for role in ("seller", "buyer"):
+        if view in _views(role):
+            return role
+    return "admin"
+
+
+def _session(request: Request) -> dict | None:
+    """{real: account, view: account or None}. Anything that does not match a demo account counts as signed out."""
+    raw = request.cookies.get(SESSION_COOKIE) or ""
+    parts = raw.split("|")
+    if len(parts) < 2:
+        return None
+    acc = _demo_accounts()
+    real = acc.get(parts[1])
+    if real is None or real["role"] != parts[0]:
+        return None
+    view = acc.get(parts[2]) if len(parts) > 2 and parts[2] and real["role"] == "admin" else None
+    return {"real": real, "view": view if view and view["role"] != "admin" else None}
+
+
+def _session_out(sess: dict) -> dict:
+    a = sess["view"] or sess["real"]
+    lane_items = [i for g in _menu(a["role"]) for i in g["items"] if not i["lane"] or i["lane"] == a["lane"]]
+    out = {**{k: v for k, v in a.items()}, "business_name": a["name"], "role_name": ROLE_NAMES[a["role"]], "menu": _menu(a["role"]),
+           "views": _views(a["role"]), "home": lane_items[0]["view"], "viewing_as": sess["view"] is not None,
+           "owners": {v: {"role": _owner(v), "for": ROLE_FOR[_owner(v)]} for v in _views("admin")}}
+    if sess["real"]["role"] == "admin":  # the "View as" menu
+        out["real"] = {"business_id": "admin", "business_name": sess["real"]["name"], "role": "admin"}
+        out["accounts"] = [{"business_id": x["business_id"], "name": x["name"], "role": x["role"], "role_name": ROLE_NAMES[x["role"]],
+                            "area": x["area"], "lane": x["lane"]}
+                           for x in _demo_accounts().values()]
+    return out
+
+
+def _set_session(response: Response, role: str, business_id: str, view: str = ""):
+    response.set_cookie(SESSION_COOKIE, f"{role}|{business_id}|{view}", httponly=True, samesite="lax", max_age=12 * 3600, path="/")
+
+
+class SessionIn(BaseModel):
+    role: Literal["seller", "buyer", "admin"]
+    business_id: str
+
+
+class ViewAsIn(BaseModel):
+    business_id: str
+
+
+@app.get("/api/session")
+def get_session(request: Request):
+    sess = _session(request)
+    if sess is None:
+        raise HTTPException(401, "Not signed in. Choose a demo account on the start page.")
+    return _session_out(sess)
+
+
+@app.post("/api/session")
+def start_session(s: SessionIn, response: Response):
+    a = _demo_accounts().get(s.business_id)
+    if a is None or a["role"] != s.role:
+        raise HTTPException(422, "Choose one of the demo accounts for this role.")
+    _set_session(response, s.role, s.business_id)
+    return _session_out({"real": a, "view": None})
+
+
+@app.delete("/api/session")
+def end_session(response: Response):
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return {"signed_out": True}
+
+
+@app.post("/api/session/view-as")
+def view_as(v: ViewAsIn, request: Request, response: Response):
+    """Admin only: see the app exactly as one demo business does, for a live demo."""
+    sess = _session(request)
+    if sess is None or sess["real"]["role"] != "admin":
+        raise HTTPException(403, "Only the CIRCULATE admin can view the app as another business.")
+    target = _demo_accounts().get(v.business_id)
+    if target is None:
+        raise HTTPException(422, "Choose one of the demo businesses.")
+    view = "" if target["role"] == "admin" else target["business_id"]
+    _set_session(response, "admin", "admin", view)
+    return _session_out({"real": sess["real"], "view": None if not view else target})
+
+
+@app.delete("/api/session/view-as")
+def exit_view_as(request: Request, response: Response):
+    sess = _session(request)
+    if sess is None or sess["real"]["role"] != "admin":
+        raise HTTPException(403, "Only the CIRCULATE admin can view the app as another business.")
+    _set_session(response, "admin", "admin")
+    return _session_out({"real": sess["real"], "view": None})
+
+
+_MARK = ('<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>'
+         '<rect x="8.5" y="13" width="5" height="6" rx=".5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.6 1.4" opacity=".7"/>'
+         '<rect x="17" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" opacity=".55"/>'
+         '<rect x="19.5" y="11" width="6" height="7" rx="1" fill="#f2a33a"/><path d="M13 21.5h4.2" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round"/>'
+         '<path d="M15.6 19.9l1.8 1.6-1.8 1.6" fill="none" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
+def _entry_page(title: str, body: str) -> str:
+    return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<title>{_html.escape(title)}</title><link rel="icon" href="/static/brand/favicon.svg" type="image/svg+xml">'
+            '<link rel="preload" href="/static/fonts/ibm-plex-sans-latin.woff2" as="font" type="font/woff2" crossorigin>'
+            '<link rel="stylesheet" href="/static/app.css"></head>'
+            f'<body class="entry"><main class="entry-main">{body}</main></body></html>')
+
+
+def _ic(name: str) -> str:
+    return f'<svg class="ic" aria-hidden="true"><use href="/static/icons/sprite.svg#i-{name}"/></svg>'
+
+
+def _start_page(sess: dict | None) -> str:
+    e = _html.escape
+    cont = ""
+    if sess:
+        a = sess["view"] or sess["real"]
+        cont = (f'<p class="entry-cont">Signed in as <b>{e(a["short_name"])}</b>. <a href="/app">Continue {_ic("arrow-right")}</a></p>')
+    cards = [("seller", "I sell surplus", "Workshops and kitchens: find your surplus and sell it before it becomes scrap.", "factory"),
+             ("buyer", "I buy materials", "Fabricators, messes and food banks: get what you need from nearby surplus.", "shopping-cart"),
+             ("admin", "Admin", "CIRCULATE team: follow every deal and see where each number comes from.", "shield-check")]
+    body = (f'<header class="entry-head">{_MARK}<div><div class="entry-brand">CIRCULATE</div><p class="lead">Sell surplus before it becomes scrap.</p></div></header>'
+            + cont +
+            '<nav class="entry-roles" aria-label="Choose how you use CIRCULATE">'
+            + "".join(f'<a class="rolecard r-{r}" href="/login/{r}"><span class="rico">{_ic(icon)}</span><span class="rc-t">{e(t)}</span>'
+                      f'<span class="rc-d">{e(d)}</span><span class="rc-go">{"Sign in" if r != "admin" else "CIRCULATE team"} {_ic("arrow-right")}</span></a>'
+                      for r, t, d, icon in cards)
+            + '</nav><p class="entry-foot">Prototype. Demo accounts only. Sample data is labelled.</p>')
+    return _entry_page("CIRCULATE", body)
+
+
+@app.get("/login/{role}", response_class=HTMLResponse)
+def login_page(role: str, request: Request):
+    if role not in ROLE_NAMES:
+        raise HTTPException(404, "There is no such login page. Choose seller, buyer or admin on the start page.")
+    if _session(request) is not None:
+        return RedirectResponse("/app", status_code=307)
+    e = _html.escape
+    accounts = [a for a in _demo_accounts().values() if a["role"] == role]
+    first = accounts[0]
+    cards = "".join(
+        f'<button class="acct" type="button" data-id="{e(a["business_id"])}"><span class="av">{e(a["initial"])}</span>'
+        f'<span class="ac-t"><b>{e(a["short_name"])}</b><span>{e(a["area"] or ("Food bank" if a.get("contact_role") == "food bank" else "Hostel mess" if a.get("buyer_type") == "hostel" else ""))}</span></span>'
+        f'<span class="pill">{e(ROLE_NAMES[role])}</span>{_ic("chevron-right")}</button>' for a in accounts)
+    body = f"""<div class="login r-{role}">
+  <a class="entry-back" href="/">{_ic("chevron-right")}Back</a>
+  <div class="login-card">
+    <div class="login-head">{_MARK}<div><span class="lbl">CIRCULATE</span><h1>{e(ROLE_NAMES[role])}</h1></div></div>
+    <p class="mut">{"Choose your business. One tap signs you in." if len(accounts) > 1 else "One tap signs you in."}</p>
+    <div class="accts">{cards}</div>
+    <details class="phone"><summary>Sign in with phone</summary>
+      <form id="pf" class="form" novalidate><label class="field">Phone number<input id="ph" type="tel" inputmode="tel" value="{DEMO_PHONE}" autocomplete="off"></label>
+        <label class="field">4-digit PIN<input id="pin" type="password" inputmode="numeric" maxlength="4" value="{DEMO_PIN}" autocomplete="off"></label>
+        <button class="btn pri" type="submit">Sign in</button>
+        <p class="note">Demo: this signs you in as {e(first["short_name"])}.</p></form></details>
+    <p class="err" id="lerr" role="alert" hidden></p>
+  </div>
+  <p class="entry-foot">Demo login. No real accounts or passwords.</p>
+</div>
+<script>
+const ROLE = {json.dumps(role)}, FIRST = {json.dumps(first["business_id"])};
+async function signIn(id) {{
+  document.querySelectorAll(".acct,#pf button").forEach(b => b.disabled = true);
+  try {{
+    const r = await fetch("/api/session", {{method: "POST", headers: {{"Content-Type": "application/json"}}, body: JSON.stringify({{role: ROLE, business_id: id}})}});
+    if (!r.ok) throw new Error();
+    location.replace("/app");
+  }} catch (e) {{
+    const x = document.getElementById("lerr"); x.hidden = false; x.textContent = "Could not reach the app. Check that it is still running, then try again.";
+    document.querySelectorAll(".acct,#pf button").forEach(b => b.disabled = false);
+  }}
+}}
+document.querySelectorAll(".acct").forEach(b => b.onclick = () => signIn(b.dataset.id));
+document.getElementById("pf").onsubmit = ev => {{ ev.preventDefault(); signIn(FIRST); }};
+</script>"""
+    return _entry_page(f"{ROLE_NAMES[role]} login · CIRCULATE", body)

@@ -10,7 +10,7 @@
 <a class="skip" href="#main">Skip to content</a>
 <div class="app">
   <nav class="rail" aria-label="Sections">
-    <a class="brand" href="#" aria-label="CIRCULATE home">
+    <a class="brand" href="#" aria-label="Your home screen">
       <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
         <rect x="2" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
         <rect x="8.5" y="13" width="5" height="6" rx=".5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.6 1.4" opacity=".7"/>
@@ -25,10 +25,11 @@
     <div class="foot">Real engine, sample data.<br>No field data yet.</div>
   </nav>
   <div class="work">
+    <div class="viewas-bar" id="viewasBar" role="status" hidden></div>
     <header class="topbar">
       <div class="switch"><span class="lbl">Lane</span><span class="seg" id="lane"></span></div>
-      <div class="switch"><span class="lbl">Role</span><span class="seg" id="role"></span></div>
       <div class="grow"></div>
+      <div class="who" id="who"></div>
       <button class="bell" type="button" id="bell" data-view="ready" aria-label="WhatsApp alerts ready to send" title="WhatsApp alerts ready to send"><svg class="ic" aria-hidden="true"><use href="/static/icons/sprite.svg#i-bell"/></svg><span class="bell-n" id="bellN" hidden>0</span></button>
       <span class="pill p-warn" title="Every business, price and quantity in this demo is made up. The engine is real.">Sample data</span>
     </header>

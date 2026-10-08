@@ -131,15 +131,9 @@ function dimLines(L, W, u) {
 /* ---------------- state and navigation ---------------- */
 const LANES = {durable: {name: "Durable", cls: "np", scen: ["steel", "sheets", "bars"]}, fresh: {name: "Fresh", cls: "pe", scen: ["food"]}};
 const ROLES = {buyer: "Buyer", seller: "Seller", admin: "Admin"};
-// [view, title, icon, lane only]
-const NAV = {
-  seller: [["My workshop", [["connect", "Connect your system", "plug"], ["gapfill", "Sold before it's cut", "scissors", "durable"], ["stock", "Stock and passports", "qr-code"], ["offers", "Offers and recovery plan", "route"]]],
-    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]], ["Alerts", [["ready", "Ready to send", "send"], ["whatsapp", "WhatsApp alerts", "message-circle"]]]],
-  buyer: [["Marketplace", [["post", "Post a requirement", "file-plus-2"], ["browse", "Browse surplus", "search"], ["match", "Order and match", "layers"]]],
-    ["My orders", [["reqs", "My requirements", "clipboard-list"], ["deals", "My deals", "receipt"]]],
-    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]], ["Alerts", [["ready", "Ready to send", "send"], ["whatsapp", "WhatsApp alerts", "message-circle"]]]],
-  admin: [["Platform", [["monitor", "Deal monitor", "gauge"], ["quality", "Data quality", "shield-check"], ["prices", "Price references", "banknote"], ["rules", "Rules", "list-checks"], ["sim", "Simulation lab", "flask-conical"]]], ["Alerts", [["ready", "Ready to send", "send"], ["whatsapp", "WhatsApp alerts", "message-circle"]]]],
-};
+// The left rail comes from the demo session: one menu per role, defined once on the server. [view, title, icon, lane only]
+const NAV = {seller: [], buyer: [], admin: []};
+let SESSION = null;
 const TITLES = {
   ready: ["Ready to send", "WhatsApp alerts CIRCULATE has prepared. Open each one in WhatsApp and press send; nothing goes out by itself."],
   whatsapp: ["WhatsApp alerts", "Register a WhatsApp number and choose the alerts you want. CIRCULATE prepares each message; a person sends it with one click."],
@@ -158,8 +152,9 @@ const TITLES = {
   prices: ["Price references", "Every price the engine uses, with its source and date."],
   rules: ["Rules", "What the engine checks before it accepts a piece or a lot."],
   sim: ["Simulation lab", "Gap Fill tested on 5,000 simulated sheets. Simulated, sample prices."],
+  users: ["All users", "Every demo business and what it sees. View the app as any of them in one click."],
 };
-const st = {lane: "durable", role: "seller", view: "welcome", scen: {durable: "steel", fresh: "food"}, ord: {}, rate: {}, off: {},
+const st = {lane: "durable", role: "seller", view: "", scen: {durable: "steel", fresh: "food"}, ord: {}, rate: {}, off: {},
   plan: {rejected: [], elapsed: 0, key: null}, deadline: {}, gf: null, gfDeclined: [], gfOpen: false, sellerFilter: "", lastDeal: null,
   imp: {durable: {}, fresh: {}}, ordId: {}, postKind: "flat", post: {flat: null, linear: null, perishable: null}, postErr: {}, postMsg: null,
   man: {durable: {material: "mild_steel", length_mm: "", width_mm: "", thickness_mm: "", grade: "E250", condition: "good", is_full_sheet: false, days_unused: "", seller_id: ""},
@@ -170,40 +165,65 @@ const st = {lane: "durable", role: "seller", view: "welcome", scen: {durable: "s
   job: {sheet_length_mm: 2500, sheet_width_mm: 1250, thickness_mm: 6, grade: "E250", part_name: "base plate", part_length_mm: 450, part_width_mm: 350, quantity: 9}};
 
 function navFor(role, lane) { return NAV[role].flatMap(([, items]) => items).filter(n => !n[3] || n[3] === lane); }
+const home = () => navFor(st.role, st.lane)[0][0];
+const allowed = view => view === "ready" || navFor(st.role, st.lane).some(n => n[0] === view);
+function notYours(view) {
+  // another role's screen: a quiet note, then your own home (a screen of your own role that needs the other lane just goes home)
+  if (view && VIEWS[view] && SESSION && !SESSION.views.includes(view)) toast(`That page is for ${SESSION.owners[view] ? SESSION.owners[view].for : "another role"}.`);
+}
 function readHash() {
-  const h = location.hash.slice(1);
-  if (!h) { st.view = "welcome"; return; }
-  const [role, view, lane] = h.split("/");
-  if (ROLES[role]) st.role = role;
+  const [, view, lane] = location.hash.slice(1).split("/");
   if (LANES[lane]) st.lane = lane;
-  if (view && navFor(st.role, st.lane).some(n => n[0] === view)) st.view = view;
-  else st.view = navFor(st.role, st.lane)[0][0];
+  if (view && allowed(view)) st.view = view;
+  else { notYours(view); st.view = home(); history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`); }
 }
 function go(patch) {
-  Object.assign(st, patch);
-  if (st.view !== "welcome" && !navFor(st.role, st.lane).some(n => n[0] === st.view)) st.view = navFor(st.role, st.lane)[0][0];
-  history.replaceState(null, "", st.view === "welcome" ? location.pathname + location.search : `#${st.role}/${st.view}/${st.lane}`);
+  const {role, ...rest} = patch;  // the role comes from the demo login, never from a link
+  Object.assign(st, rest);
+  if (!allowed(st.view)) { notYours(st.view); st.view = home(); }
+  history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`);
   render();
 }
 function shell() {
+  const S = SESSION;
   $("#lane").className = "seg " + LANES[st.lane].cls;
   $("#lane").innerHTML = Object.entries(LANES).map(([k, v]) => `<button type="button" data-lane="${k}" aria-pressed="${k === st.lane}">${v.name}</button>`).join("");
-  $("#role").innerHTML = Object.entries(ROLES).map(([k, v]) => `<button type="button" data-role="${k}" aria-pressed="${k === st.role}">${v}</button>`).join("");
+  $("#who").innerHTML = `<span class="who-av" aria-hidden="true">${esc(S.initial)}</span><span class="who-t"><b title="${esc(S.business_name)}">${esc(S.short_name)}</b><span class="pill role-${S.role}">${esc(S.role_name)}</span></span>`
+    + (S.accounts ? `<label class="viewas-pick"><span class="vh">View as</span><select id="viewAs" aria-label="View the app as a demo business"><option value="">View as…</option>${S.accounts.map(a => `<option value="${esc(a.business_id)}" ${S.viewing_as && a.business_id === S.business_id ? "selected" : ""}>${esc(a.name)} · ${esc(a.role_name)}</option>`).join("")}</select></label>` : "")
+    + `<button class="btn sm ghost" type="button" id="logout">Log out</button>`;
+  const bar = $("#viewasBar");
+  bar.hidden = !S.viewing_as;
+  if (S.viewing_as) bar.innerHTML = `${ic("eye", "sm")}<span>Viewing as <b>${esc(S.business_name)}</b></span><button type="button" id="exitView">Exit</button>`;
   $("#nav").innerHTML = NAV[st.role].map(([grp, items]) => {
     const vis = items.filter(n => !n[3] || n[3] === st.lane);
     return vis.length ? `<h6>${esc(grp)}</h6>` + vis.map(([k, t, icon]) => `<button type="button" data-view="${k}" ${k === st.view ? 'aria-current="page"' : ""}>${ic(icon)}<span>${esc(t)}</span></button>`).join("") : "";
   }).join("") + (st.role === "seller" && st.lane === "fresh" ? `<p class="railnote">Sold before it's cut is about cutting sheet, so it lives in the Durable lane.</p>` : "");
 }
+async function switchSession(method, path, body) {
+  try { await api(path, body, method, body); location.replace("/app"); } catch (e) { toast(esc(e.message), "bad"); }
+}
+document.addEventListener("change", e => { if (e.target.id === "viewAs" && e.target.value) switchSession("POST", "/api/session/view-as", {business_id: e.target.value}); });
 document.addEventListener("click", e => {
-  const home = e.target.closest(".brand");
-  if (home) { e.preventDefault(); go({view: "welcome"}); return; }
-  const b = e.target.closest("[data-lane],[data-role],[data-view]");
+  if (e.target.closest("#logout")) { fetch("/api/session", {method: "DELETE"}).finally(() => location.replace("/")); return; }
+  if (e.target.closest("#exitView")) { fetch("/api/session/view-as", {method: "DELETE"}).finally(() => location.replace("/app")); return; }
+  const brand = e.target.closest(".brand");
+  if (brand) { e.preventDefault(); go({view: home()}); return; }
+  const b = e.target.closest("[data-lane],[data-view]");
   if (!b || !b.closest(".rail,.topbar")) return;
   if (b.dataset.lane) go({lane: b.dataset.lane});
-  else if (b.dataset.role) go({role: b.dataset.role, view: navFor(b.dataset.role, st.lane)[0][0]});
   else go({view: b.dataset.view});
 });
 window.addEventListener("hashchange", () => { readHash(); render(); });
+/* Each demo business lands on its own data: its lane, its stock, its order. */
+function applySession(S) {
+  SESSION = S;
+  st.role = S.role;
+  NAV[S.role] = S.menu.map(g => [g.group, g.items.map(i => [i.view, i.label, i.icon, i.lane || undefined])]);
+  st.lane = S.lane || "durable";
+  if (S.scenario) st.scen[st.lane] = S.scenario;
+  if (S.seller_id) st.sellerFilter = S.seller_id;
+  if (S.demand_id) st.ordId[S.scenario] = S.demand_id;
+}
 
 /* ---------------- shared pieces ---------------- */
 const SC = {};
@@ -265,16 +285,17 @@ function becomeHtml(b, top) {
 }
 
 /* ---------------- Buyer: post a requirement, and my requirements ---------------- */
+const myBuyerName = () => SESSION && SESSION.role === "buyer" ? SESSION.business_name : "";
 function postDefaults(kind, O) {
   if (kind === "perishable") return {categories: ["vegetables"], quantity: "", storage_available: ["ambient"], min_hours_left_on_arrival: "6",
-    buyer_type: "business", normal_price_per_kg: String(O.food_price ?? ""), buyer_fssai_licensed: false, needed_by: "", buyer_name: "",
+    buyer_type: SESSION && SESSION.buyer_type || "business", normal_price_per_kg: String(O.food_price ?? ""), buyer_fssai_licensed: false, needed_by: "", buyer_name: myBuyerName(),
     x_km: String(O.centre.food[0]), y_km: String(O.centre.food[1])};
   if (kind === "linear") { const pr = O.profiles[0];
     return {part_name: "", profile: pr.profile, cut_length_mm: "", quantity: "", accepted_grades: [O.bar_grades[0]], accepted_conditions: [...O.default_conditions],
-      new_price_per_kg: String(pr.sample_price ?? ""), needed_by: "", buyer_name: "", x_km: String(O.centre.bars[0]), y_km: String(O.centre.bars[1])}; }
+      new_price_per_kg: String(pr.sample_price ?? ""), needed_by: "", buyer_name: myBuyerName(), x_km: String(O.centre.bars[0]), y_km: String(O.centre.bars[1])}; }
   const m = O.materials.find(x => x.key === "mild_steel");
   return {part_name: "", material: "mild_steel", length_mm: "", width_mm: "", thickness_mm: "", accepted_grades: m.grades.slice(0, 1), accepted_conditions: [...O.default_conditions],
-    quantity: "", new_price_per_kg: String(m.sample_price ?? ""), needed_by: "", buyer_name: "", x_km: String(O.centre.steel[0]), y_km: String(O.centre.steel[1])};
+    quantity: "", new_price_per_kg: String(m.sample_price ?? ""), needed_by: "", buyer_name: myBuyerName(), x_km: String(O.centre.steel[0]), y_km: String(O.centre.steel[1])};
 }
 async function vPost(el) {
   const O = await api("/api/requirements/options"), lane = st.lane;
@@ -592,7 +613,7 @@ async function vMatch(el) {
           route_km: b.route_km, value_above_salvage: b.value.seller_gain_above_salvage, buyer_utilisation: d.buyer_utilisation ?? null,
           scenario: k, rate_multiplier: rate, requirement_id: d.requirement_id ?? null});
         st.lastDeal = deal.id;
-        toast(`Deal #${deal.id} agreed (simulated). <a href="#buyer/pickup/${st.lane}">Book the pickup</a> or <a href="#buyer/deals/${st.lane}">track it in My deals</a>.`);
+        toast(`Deal #${deal.id} agreed (simulated). <a href="#${st.role}/pickup/${st.lane}">Book the pickup</a>${allowed("deals") ? ` or <a href="#${st.role}/deals/${st.lane}">track it in Deals</a>` : ""}.`);
         acc.innerHTML = `${ic("circle-check")}Accepted as deal #${deal.id}`;
       } catch (e) { toast(esc(e.message), "bad"); acc.disabled = false; }
     };
@@ -609,8 +630,9 @@ async function vDeals(el, admin) {
   const ds = r.deals;
   const tiles = admin ? `<div class="tiles"><div class="tile"><b>${ds.length}</b><span>Deals</span></div><div class="tile"><b>${ds.filter(x => x.status === "dispatched").length}</b><span>Dispatched</span></div><div class="tile"><b>${ds.filter(x => x.status === "delivered").length}</b><span>Delivered</span></div><div class="tile hi"><b>${ds.filter(x => !x.is_simulated && x.status === "delivered").length}</b><span>Verified (real, with evidence)</span></div></div>` : "";
   if (!ds.length) {
-    el.innerHTML = tiles + `<div class="empty">No deals yet. Go to <a href="#buyer/match/${st.lane}" id="toMatch">Order and match</a> and accept an order to create one.</div>`;
-    $("#toMatch", el).onclick = e => { e.preventDefault(); go({role: "buyer", view: "match"}); };
+    el.innerHTML = tiles + (allowed("match") ? `<div class="empty">No deals yet. Go to <a href="#${st.role}/match/${st.lane}" id="toMatch">Order and match</a> and accept an order to create one.</div>`
+      : emptyState("receipt", "No deals yet. A deal appears here when a buyer accepts an order that uses your stock."));
+    const tm = $("#toMatch", el); if (tm) tm.onclick = e => { e.preventDefault(); go({view: "match"}); };
     return;
   }
   const step = s => ({agreed: 1, dispatched: 2, delivered: 3})[s];
@@ -831,7 +853,7 @@ function bindManual(el, lane) {
     render();
   };
   const pd = $("#manPhotoDel", el); if (pd) pd.onclick = () => { st.manPhoto[lane] = null; render(); };
-  const tb = $("#manToBrowse", el); if (tb) tb.onclick = () => go({role: "buyer", view: "browse"});
+  const tb = $("#manToBrowse", el); if (tb) { if (allowed("browse")) tb.onclick = () => go({view: "browse"}); else tb.remove(); }
   const send = async anyway => {
     const fields = {...F}, body = {fields, days_unused_limit: st.impLimit.days, hours_left_limit: st.impLimit.hours, measured: st.manMeasured[lane], list_anyway: anyway, photo: st.manPhoto[lane]};
     delete fields.mode; delete fields.use_by;
@@ -978,6 +1000,7 @@ async function vStock(el) {
   const k = laneScen(), S = await scen(k), fresh = S.meta.engine === "perishable";
   let r, imp;
   try { [r, imp] = await Promise.all([api(`/api/stock/${k}`), api(`/api/stock/import_${st.lane}`)]); } catch (e) { el.innerHTML = errBox(e); return; }
+  if (st.sellerFilter && !S.data.sellers.some(s => s.id === st.sellerFilter)) st.sellerFilter = "";  // your business is not in this material
   let items = r.items.filter(x => !st.sellerFilter || x.seller_id === st.sellerFilter);
   if (fresh) items = items.slice().sort((a, b) => a.hours_left - b.hours_left);
   const maxH = 72;
@@ -1031,8 +1054,9 @@ async function vPickup(el) {
   const fresh = st.lane === "fresh", mine = r.deals.filter(d => (d.kind === "perishable") === fresh);
   if (!mine.length) {
     el.innerHTML = `<p class="callout note">Transporters and bookings are simulated in this prototype. No live booking with any logistics company.</p>
-      <div class="empty">No accepted ${fresh ? "Fresh" : "Durable"} deals yet. Accept an order in <a href="#buyer/match/${st.lane}" id="toMatch">Buyer &gt; Order and match</a>, then come back to book the pickup.</div>`;
-    $("#toMatch", el).onclick = e => { e.preventDefault(); go({role: "buyer", view: "match"}); };
+      ${allowed("match") ? `<div class="empty">No accepted ${fresh ? "Fresh" : "Durable"} deals yet. Accept an order in <a href="#${st.role}/match/${st.lane}" id="toMatch">Order and match</a>, then come back to book the pickup.</div>`
+        : emptyState("truck", `No accepted ${fresh ? "Fresh" : "Durable"} deals yet. A pickup appears here once a buyer accepts an order that uses your stock.`)}`;
+    const tm = $("#toMatch", el); if (tm) tm.onclick = e => { e.preventDefault(); go({view: "match"}); };
     return;
   }
   const id = mine.some(d => d.id === st.lastDeal) ? st.lastDeal : mine[0].id;
@@ -1184,8 +1208,8 @@ async function vWhatsapp(el) {
   const edit = W.edit != null ? R.contacts.find(c => c.id === W.edit) : null;
   const known = R.businesses.map(b => b.name);
   if (!W.form || W.form._for !== (edit ? edit.id : "new")) {
-    const role = edit ? edit.role : (st.role === "seller" ? "seller" : st.role === "buyer" ? "buyer" : "seller");
-    const business = edit ? edit.business : (R.businesses.find(b => b.role === role) || {}).name || "";
+    const role = edit ? edit.role : (SESSION.contact_role || "seller");
+    const business = edit ? edit.business : (SESSION.role !== "admin" ? SESSION.business_name : (R.businesses.find(b => b.role === role) || {}).name || "");
     W.form = {_for: edit ? edit.id : "new", business: known.includes(business) ? business : "__other", other: known.includes(business) ? "" : business,
       role, name: edit ? edit.name : "", phone: "", alerts: edit ? [...edit.alerts] : [...R.default_alerts[role]], consent: false};
   }
@@ -1247,36 +1271,27 @@ async function vWhatsapp(el) {
   });
 }
 
-/* ---------------- Welcome ---------------- */
-const MARK = `<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><rect x="8.5" y="13" width="5" height="6" rx=".5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.6 1.4" opacity=".7"/><rect x="17" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" opacity=".55"/><rect x="19.5" y="11" width="6" height="7" rx="1" fill="#f2a33a"/><path d="M13 21.5h4.2" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round"/><path d="M15.6 19.9l1.8 1.6-1.8 1.6" fill="none" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-async function vWelcome(el) {
-  const C = await credits(), hero = Object.values(C).find(c => c.category === (st.lane === "fresh" ? "hero_kitchen" : "hero_workshop"));
-  const credit = hero ? `${hero.shows}. "${hero.title}" by ${hero.author}, ${hero.licence}, via ${hero.site || "Wikimedia Commons"}` : "";
-  el.innerHTML = `<div class="welcome">
-    <section class="wh">${hero ? `<img src="${esc(hero.file)}" alt="${esc(hero.shows)}"><span class="ptag" title="Illustrative photo. ${esc(credit)}">Illustrative photo · <a href="${esc(hero.source_url)}" target="_blank" rel="noopener" title="${esc(credit)}">Credit</a></span>` : ""}
-      <div class="wh-in">${MARK}<h1>Surplus, sold before it becomes scrap</h1><p>An ERP-connected B2B marketplace for industrial and food surplus.</p></div></section>
-    <section class="flow" aria-label="How it works">
-      <div class="fstep">${ic("plug")}<div><b>Find surplus in your system</b><span>Connect an ERP or billing export; offcuts, idle stock and food near its use-by are spotted for you.</span></div></div>${ic("arrow-right", "lg")}
-      <div class="fstep">${ic("store")}<div><b>Match it on the marketplace</b><span>Buyers' orders are matched to the pieces and lots that fit, at a fair price.</span></div></div>${ic("arrow-right", "lg")}
-      <div class="fstep">${ic("truck")}<div><b>Deliver it</b><span>One pickup route, the right vehicle and the papers for the driver.</span></div></div></section>
-    <section class="roles" aria-label="Choose your role">
-      <div class="role"><span class="rico">${ic("shopping-cart")}</span><h2>Buyer</h2><p>Post what you need or browse surplus near you, and order parts cut from it.</p><button class="btn" type="button" data-go="buyer/browse">Open the marketplace ${ic("arrow-right", "sm")}</button></div>
-      <div class="role"><span class="rico">${ic("factory")}</span><h2>Seller</h2><p>Connect your stock, see what is surplus, and sell the spare part of your next sheet before you cut it.</p><button class="btn" type="button" data-go="seller/connect">Open my workshop ${ic("arrow-right", "sm")}</button></div>
-      <div class="role"><span class="rico">${ic("shield-check")}</span><h2>Admin</h2><p>Follow every deal, see where each number comes from, and review the rules.</p><button class="btn" type="button" data-go="admin/monitor">Open the platform ${ic("arrow-right", "sm")}</button></div></section>
-    <section class="start"><div><h2>New here? Start with the main idea</h2><p class="mut">A workshop sells the empty part of its next steel sheet to nearby buyers, before it cuts it. One screen, one number.</p></div>
-      <button class="btn pri lg" type="button" data-go="seller/gapfill/durable">Start here ${ic("arrow-right")}</button></section>
-    <p class="note">Every business, price and quantity in this demo is made up (Sample). The matching engine is real.</p></div>`;
-  el.querySelectorAll("[data-go]").forEach(b => b.onclick = () => { const [role, view, lane] = b.dataset.go.split("/"); go({role, view, ...(lane ? {lane} : {})}); });
+/* ---------------- Admin: all users (demo accounts) ---------------- */
+async function vUsers(el) {
+  const C = await api("/api/whatsapp/contacts"), accs = SESSION.accounts || [];
+  const norm = n => String(n || "").split(",")[0].trim().toLowerCase();
+  const nums = a => C.contacts.filter(c => norm(c.business) === norm(a.name)).length;
+  el.innerHTML = `<div class="card"><div class="scroll"><table><tr><th>Business</th><th>Role</th><th>Area</th><th>Lane</th><th class="n">WhatsApp numbers</th><th></th></tr>
+    ${accs.map(a => `<tr><td><span class="who-av sm" aria-hidden="true">${esc(a.name[0])}</span> <b>${esc(a.name.split(", ")[0])}</b></td><td><span class="pill role-${a.role}">${esc(a.role_name)}</span></td>
+      <td>${esc(a.area || "–")}</td><td>${esc(cap1(a.lane || ""))}</td><td class="n">${nums(a)}</td>
+      <td>${a.role === "admin" ? `<span class="note">${SESSION.viewing_as ? "" : "You"}</span>` : `<button class="btn sm" type="button" data-viewas="${esc(a.business_id)}">${ic("eye", "sm")}View as</button>`}</td></tr>`).join("")}</table></div>
+    <p class="note">Demo accounts only: there are no passwords and nothing secret is stored. View as switches the whole app to that business, for a live demo; Exit in the banner brings you back.</p></div>`;
+  el.querySelectorAll("[data-viewas]").forEach(b => b.onclick = () => switchSession("POST", "/api/session/view-as", {business_id: b.dataset.viewas}));
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {welcome: vWelcome, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {users: vUsers, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();
-  const my = ++ticket, main = $("#main"), welcome = st.view === "welcome";
-  const [t, sub] = welcome ? ["CIRCULATE", ""] : TITLES[st.view];
-  const head = welcome ? "" : `<header><h1>${esc(t)}</h1><p class="lead">${esc(sub)}</p></header>`;
+  const my = ++ticket, main = $("#main");
+  const item = navFor(st.role, st.lane).find(n => n[0] === st.view), [t0, sub] = TITLES[st.view], t = item ? item[1] : t0;
+  const head = `<header><h1>${esc(t)}</h1><p class="lead">${esc(sub)}</p></header>`;
   const body = document.createElement("div");
   body.className = "stack";
   const key = st.view + st.lane + st.role;
@@ -1286,12 +1301,18 @@ async function render() {
   const fresh = main.dataset.view !== key;
   main.dataset.view = key;
   main.replaceChildren();
-  if (head) main.insertAdjacentHTML("beforeend", head);
+  main.insertAdjacentHTML("beforeend", head);
   main.appendChild(body);
-  document.title = welcome ? "CIRCULATE · Surplus, sold before it becomes scrap" : `${t} · CIRCULATE`;
+  document.title = `${t} · ${SESSION.short_name} · CIRCULATE`;
   if (fresh) window.scrollTo(0, 0);
   alertsCheck();
 }
-readHash();
-if (st.view !== "welcome") history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`);
-render();
+async function boot() {
+  const r = await fetch("/api/session");
+  if (!r.ok) { location.replace("/"); return; }  // no demo session: back to the start page
+  applySession(await r.json());
+  readHash();
+  history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`);
+  render();
+}
+boot();

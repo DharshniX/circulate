@@ -6,7 +6,10 @@ c = TestClient(app)
 
 
 def test_new_app_and_legacy_page_are_served():
-    assert "app.js" in c.get("/").text
+    assert "Sell surplus before it becomes scrap." in c.get("/").text  # the start page
+    admin = TestClient(app)
+    admin.post("/api/session", json={"role": "admin", "business_id": "admin"})
+    assert "app.js" in admin.get("/app").text  # the app itself needs a demo session
     assert c.get("/legacy").status_code == 200
 
 
