@@ -25,7 +25,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from engine import scenarios as SC
 from engine.engines import REGISTRY
@@ -67,6 +67,11 @@ def db():
     for col, typ in (("scenario", "TEXT"), ("rate_multiplier", "REAL"), ("booking", "TEXT")):
         if col not in have:  # older databases: add the column, keep every row
             con.execute(f"ALTER TABLE deals ADD COLUMN {col} {typ}")
+    con.execute("""CREATE TABLE IF NOT EXISTS requirements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, lane TEXT, kind TEXT, scenario TEXT, demand TEXT,
+        needed_by TEXT, standing INTEGER, status TEXT, deal_id INTEGER, history TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS reservations (
+        req_id INTEGER PRIMARY KEY, seller TEXT, parts INTEGER, at TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS sync_folders (
         lane TEXT PRIMARY KEY, path TEXT, enabled INTEGER, measured INTEGER, days_unused_limit INTEGER, hours_left_limit REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS sync_seen (
@@ -123,6 +128,7 @@ class NewDeal(BaseModel):
     is_simulated: bool = True
     scenario: str | None = None
     rate_multiplier: float = Field(1.0, gt=0, le=20)
+    requirement_id: int | None = None
 
 
 class Advance(BaseModel):
@@ -172,15 +178,23 @@ def scenario(key: str):
 
 @app.get("/api/gapfill/demo")
 def gapfill_demo():
-    return SC.gapfill_demo()
+    """The sample job and standing orders, plus standing orders posted by buyers in this demo."""
+    g = SC.gapfill_demo()
+    g["orders"] += _posted_standing()
+    return g
 
 
 @app.post("/api/gapfill")
-def api_gapfill(req: GapFillRequest):
+def api_gapfill(req: GapFillRequest, record: bool = False, seller: str = "Your workshop"):
+    """record=true (the Sold before it's cut screen): posted requirements in the plan are marked reserved
+    by this seller; posted ones declined or left out go back to open."""
     try:
-        return plan_gap_fill(req)
+        plan = plan_gap_fill(req)
     except ValueError as e:
         _bad(e)
+    if record:
+        _record_reservations(req, plan, seller)
+    return plan
 
 
 @app.post("/api/fulfil")
@@ -231,6 +245,13 @@ def create_deal(d: NewDeal):
             (now, d.kind, d.counterfactual, d.demand_id, d.buyer_name, json.dumps(d.sellers), d.units, d.unit_name,
              d.kg_in_units, d.kg_shipped, d.route_km, d.value_above_salvage, d.buyer_utilisation, "agreed",
              int(d.is_simulated), "[]", 0, json.dumps([{"at": now, "status": "agreed"}]), d.scenario, d.rate_multiplier))
+        if d.requirement_id:
+            row = con.execute("SELECT history FROM requirements WHERE id=?", (d.requirement_id,)).fetchone()
+            if row:
+                con.execute("UPDATE requirements SET status='matched', deal_id=?, history=? WHERE id=?",
+                            (cur.lastrowid, json.dumps(json.loads(row["history"]) + [{"at": now, "status": "matched", "deal": cur.lastrowid}]),
+                             d.requirement_id))
+                con.execute("DELETE FROM reservations WHERE req_id=?", (d.requirement_id,))
         return {"id": cur.lastrowid, "status": "agreed"}
 
 
@@ -554,7 +575,7 @@ def import_clear(lane: Literal["durable", "fresh"]):
 @app.post("/api/import/cutting-job")
 def import_cutting_job(j: CuttingJob):
     """Turn the next cutting job into a Sold-before-it's-cut request, checked by the engine before it is sent."""
-    g = SC.gapfill_demo()
+    g = gapfill_demo()
     g["sheet"].update(length_mm=j.sheet_length_mm, width_mm=j.sheet_width_mm, thickness_mm=j.thickness_mm,
                       grade=j.grade.strip().upper())
     g["job"] = dict(part_name=j.part_name.strip() or "own part", length_mm=j.part_length_mm, width_mm=j.part_width_mm,
@@ -1192,6 +1213,7 @@ def _own_resources(key: str) -> list:
 
 def _dataset_with_own(key: str) -> dict:
     d = SC.dataset(key)
+    d["demands"] = d["demands"] + [r["demand_obj"] for r in _requirements(scenario=key)]
     own = _own_resources(key)
     if own:
         d["sellers"] = d["sellers"] + [_own_seller(d)]
@@ -1231,7 +1253,7 @@ def _own_order(p) -> dict:
 
 
 def _gap_standing() -> tuple[list, GapFillPrices]:
-    g = SC.gapfill_demo()
+    g = gapfill_demo()
     return [StandingOrder(**o) for o in g["orders"]], GapFillPrices(**g["prices"])
 
 
@@ -1278,8 +1300,8 @@ def _become(key: str, rid: str) -> dict:
             merged["scrap"], first = r["scrap"], (seller, d)
     if res.kind == "flat":  # standing orders and common parts, with the first cluster's seller, settings and transport
         seller, d = first
-        cands = [BEC.Candidate(BEC.standing_order_demand(o, gp.handling_per_part), "standing", BEC.order_label(o.buyer_name, True),
-                               pickup=gp.pickup) for o in standing]
+        cands = [BEC.Candidate(BEC.standing_order_demand(o, gp.handling_per_part), "standing",
+                               BEC.order_label(o.buyer_name, not o.id.startswith("R")), pickup=gp.pickup) for o in standing]
         price, label = _reference_price(res, all_demands, standing)
         cands += BEC.reference_candidates(res, price, label)
         extra = BEC.become(res, seller, cands, d["settings"], d["transport"])
@@ -1348,3 +1370,217 @@ def _become_card(key: str, rid: str) -> str:
     return (f'<div class="card"><h2 style="margin:0">What can this become?</h2><p class="note">{e(base)} {e(b["note"])}</p>{rows}'
             + (f'<details><summary>Not possible ({len(b["refused"])})</summary><ul>{refused}</ul></details>' if refused else "")
             + '</div>')
+
+
+# ---------------- Buyers: post a requirement ----------------
+from engine.models import FlatDemand, LinearDemand, PerishableDemand
+
+POSTED_NOTE = "Posted by a buyer in this demo"
+BUYER_TYPES = {"business": "food_business", "hostel": "food_business", "food_bank": "ngo"}
+
+
+class RequirementIn(BaseModel):
+    lane: Literal["durable", "fresh"]
+    kind: Literal["flat", "linear", "perishable"]
+    fields: dict
+    needed_by: date | None = None
+    standing: bool = False
+
+
+def _scenario_for(kind: str, material: str | None) -> str:
+    if kind == "perishable":
+        return "food"
+    if kind == "linear":
+        return "bars"
+    return "steel" if material == "mild_steel" else "sheets"
+
+
+def _centre(key: str) -> tuple[float, float]:
+    sel = SC.dataset(key)["sellers"]
+    return round(sum(x.x_km for x in sel) / len(sel), 1), round(sum(x.y_km for x in sel) / len(sel), 1)
+
+
+def _sample_price(kind: str, material: str | None, buyer_type: str | None = None) -> float | None:
+    """The cluster's lowest new price for this material (a cautious default the buyer can change). Sample data."""
+    if kind == "perishable":
+        prices = [x.normal_price_per_kg for x in SC.dataset("food")["demands"] if x.buyer_type == buyer_type]
+        return min(prices) if prices else None
+    key = _scenario_for(kind, material)
+    prices = [x.new_price_per_kg for x in SC.dataset(key)["demands"] if x.kind == kind and x.material == material]
+    if not prices and kind == "flat":
+        prices = [o["new_price_per_kg"] for o in SC.gapfill_demo()["orders"] if o["material"] == material]
+    return min(prices) if prices else None
+
+
+def _build_demand(r: RequirementIn, req_id: int = 0):
+    """Check a requirement with the existing demand model. Returns (demand, scenario, errors)."""
+    f = {k: v for k, v in r.fields.items() if v not in (None, "")}
+    errors = {}
+    if r.kind == "perishable" and r.lane != "fresh" or r.kind != "perishable" and r.lane != "durable":
+        errors["kind"] = "This kind of requirement belongs to the other lane."
+    material = str(f.get("material", "mild_steel" if r.kind == "linear" else "")).strip().lower().replace(" ", "_")
+    if r.kind != "perishable":
+        try:
+            M_name(material)
+        except ValueError as e:
+            errors["material"] = str(e)[0].upper() + str(e)[1:] + "."
+            material = "mild_steel"
+        f["material"] = material
+    key = _scenario_for(r.kind, material)
+    cx, cy = _centre(key)
+    f.setdefault("x_km", cx)
+    f.setdefault("y_km", cy)
+    name = str(f.get("buyer_name", "")).strip()
+    f.update(id=f"R{req_id}", buyer_id=f"BUYER-{name.lower().replace(' ', '-')}" if name else "", label="sample")
+    if r.kind == "perishable":
+        bt = f.pop("buyer_type", "")
+        if bt not in BUYER_TYPES:
+            errors["buyer_type"] = "Choose business, hostel mess or food bank."
+        f["buyer_type"] = BUYER_TYPES.get(bt, "food_business")
+        f.setdefault("part_name", "kg of food")
+        if f["buyer_type"] == "ngo":
+            f["normal_price_per_kg"] = 0.0  # a donation: no price is charged
+        model = PerishableDemand
+    else:
+        model = FlatDemand if r.kind == "flat" else LinearDemand
+    if r.standing and r.kind != "flat":
+        errors["standing"] = "Standing orders are for sheet parts only."
+    if r.needed_by is not None and r.needed_by < datetime.now().date():
+        errors["needed_by"] = "Pick today or a later date."
+    try:
+        demand = model(**f)
+    except ValidationError as e:
+        return None, key, {**IMP._field_errors(e), **errors}
+    if not name:
+        errors["buyer_name"] = "This is needed."
+    return (None if errors else demand), key, errors
+
+
+def _requirements(lane: str | None = None, scenario: str | None = None, include_closed: bool = False) -> list[dict]:
+    q, args = "SELECT * FROM requirements WHERE 1=1", []
+    if lane:
+        q, args = q + " AND lane=?", args + [lane]
+    if scenario:
+        q, args = q + " AND scenario=?", args + [scenario]
+    if not include_closed:
+        q += " AND status != 'closed'"
+    with closing(db()) as con:
+        rows = con.execute(q + " ORDER BY id DESC", args).fetchall()
+        res = {r["req_id"]: dict(r) for r in con.execute("SELECT * FROM reservations")}
+    model = {"flat": FlatDemand, "linear": LinearDemand, "perishable": PerishableDemand}
+    out = []
+    for r in rows:
+        dem = model[r["kind"]].model_validate_json(r["demand"])
+        rv = res.get(r["id"]) if r["status"] == "open" else None
+        status = "reserved" if rv else r["status"]
+        text = {"open": "Open", "matched": f"Matched (deal #{r['deal_id']})", "closed": "Closed",
+                "reserved": f"Reserved in a cutting plan by {rv['seller']}, {rv['parts']} parts" if rv else ""}[status]
+        out.append({"id": r["id"], "demand_id": dem.id, "lane": r["lane"], "kind": r["kind"], "scenario": r["scenario"],
+                    "created_at": r["created_at"], "needed_by": r["needed_by"], "standing": bool(r["standing"]), "status": status,
+                    "status_text": text, "deal_id": r["deal_id"], "reserved": rv, "history": json.loads(r["history"]),
+                    "demand": dem.model_dump(mode="json"), "demand_obj": dem, "note": POSTED_NOTE})
+    return out
+
+
+def _public(r: dict) -> dict:
+    return {k: v for k, v in r.items() if k != "demand_obj"}
+
+
+def _posted_standing() -> list[dict]:
+    """Open standing requirements as Gap Fill standing orders (sheet parts only)."""
+    out = []
+    for r in _requirements(lane="durable"):
+        if not r["standing"] or r["status"] not in ("open", "reserved"):
+            continue
+        d = r["demand_obj"]
+        out.append(dict(id=d.id, buyer_name=d.buyer_name, part_name=d.part_name, length_mm=d.length_mm, width_mm=d.width_mm,
+                        thickness_mm=d.thickness_mm, material=d.material, accepted_grades=d.accepted_grades, quantity=d.quantity,
+                        new_price_per_kg=d.new_price_per_kg, buyer_utilisation=d.buyer_utilisation, label="sample",
+                        posted=True, note=POSTED_NOTE))
+    return out
+
+
+def _record_reservations(req: GapFillRequest, plan: dict, seller: str):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    reserved = {n["order_id"]: n["units"] for n in plan.get("neighbours", [])}
+    with closing(db()) as con, con:
+        for o in req.orders:
+            if not (o.id.startswith("R") and o.id[1:].isdigit()):
+                continue
+            rid = int(o.id[1:])
+            if o.id in reserved and o.id not in req.declined_order_ids:
+                con.execute("INSERT OR REPLACE INTO reservations (req_id, seller, parts, at) VALUES (?,?,?,?)",
+                            (rid, seller, reserved[o.id], now))
+            else:
+                con.execute("DELETE FROM reservations WHERE req_id=?", (rid,))
+
+
+@app.get("/api/requirements/options")
+def requirement_options():
+    from typing import get_args
+    from engine import materials as MAT
+    from engine.models import Condition, FoodCategory, Storage
+    grades: dict[str, set] = {}
+    for key in ("steel", "sheets"):
+        d = SC.dataset(key)
+        for x in d["resources"]:
+            grades.setdefault(x.material, set()).add(x.grade.upper())
+        for x in d["demands"]:
+            grades.setdefault(x.material, set()).update(x.accepted_grades)
+    for o in SC.gapfill_demo()["orders"]:
+        grades.setdefault(o["material"], set()).update(o["accepted_grades"])
+    bars = SC.dataset("bars")
+    profiles = sorted({(x.profile, x.mass_per_m_kg, x.material) for x in [*bars["resources"], *bars["demands"]]})
+    return {"materials": [{"key": m.key, "name": m.name, "grades": sorted(grades.get(m.key, [])),
+                           "sample_price": _sample_price("flat", m.key)} for m in MAT.MATERIALS.values()],
+            "conditions": list(get_args(Condition)), "default_conditions": ["new", "good", "surface_rust"],
+            "profiles": [{"profile": pr, "mass_per_m_kg": kg, "material": mat, "sample_price": _sample_price("linear", mat)} for pr, kg, mat in profiles],
+            "bar_grades": sorted({g for x in bars["demands"] for g in x.accepted_grades} | {x.grade.upper() for x in bars["resources"]}),
+            "categories": list(get_args(FoodCategory)), "storage": list(get_args(Storage)),
+            "buyer_types": [{"key": "business", "name": "Food business"}, {"key": "hostel", "name": "Hostel mess"},
+                            {"key": "food_bank", "name": "Food bank (donation)"}],
+            "food_price": _sample_price("perishable", None, "food_business"),
+            "centre": {k: _centre(k) for k in SC.SCENARIOS}, "note": POSTED_NOTE}
+
+
+@app.post("/api/requirements")
+def post_requirement(r: RequirementIn):
+    """Check a buyer's requirement with the demand models and save it (as a standing order if asked)."""
+    demand, key, errors = _build_demand(r)
+    if errors:
+        raise HTTPException(422, {"message": "Some fields need fixing. Nothing was saved.", "errors": errors})
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with closing(db()) as con, con:
+        cur = con.execute("INSERT INTO requirements (created_at, lane, kind, scenario, demand, needed_by, standing, status, history)"
+                          " VALUES (?,?,?,?,?,?,?,?,?)", (now, r.lane, r.kind, key, "{}", r.needed_by.isoformat() if r.needed_by else None,
+                                                           int(r.standing), "open", json.dumps([{"at": now, "status": "open"}])))
+        rid = cur.lastrowid
+        demand = demand.model_copy(update={"id": f"R{rid}"})
+        con.execute("UPDATE requirements SET demand=? WHERE id=?", (demand.model_dump_json(), rid))
+    return _public(next(x for x in _requirements(include_closed=True) if x["id"] == rid))
+
+
+@app.get("/api/requirements")
+def list_requirements(lane: Literal["durable", "fresh"] | None = None):
+    return {"requirements": [_public(r) for r in _requirements(lane=lane, include_closed=True)]}
+
+
+@app.get("/api/requirements/demands/{key}")
+def requirement_demands(key: str):
+    """The buyer's own posted requirements for Order and match (newest first, closed ones left out)."""
+    if key not in SC.SCENARIOS:
+        raise HTTPException(404, f"unknown scenario {key}")
+    return {"demands": [{**r["demand"], "requirement_id": r["id"], "status": r["status"]} for r in _requirements(scenario=key)]}
+
+
+@app.post("/api/requirements/{req_id}/close")
+def close_requirement(req_id: int):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with closing(db()) as con, con:
+        row = con.execute("SELECT history FROM requirements WHERE id=?", (req_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "no such requirement")
+        con.execute("UPDATE requirements SET status='closed', history=? WHERE id=?",
+                    (json.dumps(json.loads(row["history"]) + [{"at": now, "status": "closed"}]), req_id))
+        con.execute("DELETE FROM reservations WHERE req_id=?", (req_id,))
+    return {"id": req_id, "status": "closed"}

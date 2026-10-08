@@ -149,7 +149,7 @@ def _field_errors(e: ValidationError) -> dict[str, str]:
         ctx = {k: (f"{v:g}" if isinstance(v, (int, float)) else v) for k, v in (x.get("ctx") or {}).items()}
         plain = {"missing": "This is needed.", "string_too_short": "This is needed.", "bool_parsing": "Choose full sheet or offcut.",
                  "float_parsing": "Enter a number.", "int_parsing": "Enter a whole number.", "int_from_float": "Enter a whole number.",
-                 "literal_error": "Choose one of the options.", "greater_than": f"Must be more than {ctx.get('gt')}.",
+                 "literal_error": "Choose one of the options.", "too_short": "Choose at least one.", "greater_than": f"Must be more than {ctx.get('gt')}.",
                  "greater_than_equal": f"Must be {ctx.get('ge')} or more.", "less_than_equal": f"Must be {ctx.get('le')} or less."}
         msg = plain.get(x["type"], x["msg"].removeprefix("Value error, "))
         msg = msg[0].upper() + msg[1:] if msg else msg

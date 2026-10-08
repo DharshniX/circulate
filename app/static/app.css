@@ -185,10 +185,10 @@ details summary{cursor:pointer}
 .manual form{display:flex;flex-direction:column;gap:var(--s2)}
 .mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:var(--s2)}
 .mfield.wide{grid-column:1/-1}
-.mfield input:not([type=radio]),.mfield select{width:100%;height:auto;min-height:44px;font-size:16px}
+.mfield input:not([type=radio]):not([type=checkbox]),.mfield select{width:100%;height:auto;min-height:44px;font-size:16px}
 .mfield input[aria-invalid="true"],.mfield select[aria-invalid="true"]{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}
 .ferr{color:var(--bad);font-size:12.5px;line-height:1.4}.ferr:empty{display:none}
-.opts{display:flex;gap:var(--s1)}
+.opts{display:flex;flex-wrap:wrap;gap:var(--s1)}
 .opts label{flex:1;position:relative;min-height:44px;display:flex;align-items:center;justify-content:center;padding:0 12px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--panel);color:var(--fg);font-size:15px;cursor:pointer;transition:background-color var(--ease),border-color var(--ease)}
 .opts label:hover{border-color:var(--mut)}
 .opts label{white-space:nowrap}
@@ -216,6 +216,18 @@ details summary{cursor:pointer}
 .bval{font:500 1.1rem var(--mono);font-variant-numeric:tabular-nums;color:var(--acc)}.bval.neg{color:var(--mut)}
 .bwrap details summary{font-size:13px;font-weight:600;padding:4px 0}
 .bwrap details .bopt{margin-top:var(--s1)}
+
+/* ---------- post a requirement ---------- */
+.rail h6.grp{margin-top:var(--s2)}
+.chips{display:flex;flex-wrap:wrap;gap:var(--s1)}
+.chips label{position:relative;display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border:1px solid var(--line);border-radius:99px;background:var(--panel);color:var(--fg);font-size:14px;cursor:pointer;transition:background-color var(--ease),border-color var(--ease)}
+.chips label:hover{border-color:var(--mut)}
+.chips input{position:absolute;opacity:0;width:1px;height:1px}
+.chips label:has(input:checked){background:var(--np);border-color:var(--np);color:#fff}
+.chips label:has(input:focus-visible){outline:2px solid var(--ring);outline-offset:2px}
+.mfield>span:first-child{font-size:12px;color:var(--mut)}
+.kindsw{min-width:280px}
+tr.closed td{opacity:.55}
 
 /* ---------- motion ---------- */
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}.btn:active{transform:none}}

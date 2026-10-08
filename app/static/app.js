@@ -22,12 +22,15 @@ async function api(path, body, method, payload) {
 const LANES = {durable: {name: "Durable", cls: "np", scen: ["steel", "sheets", "bars"]}, fresh: {name: "Fresh", cls: "pe", scen: ["food"]}};
 const ROLES = {buyer: "Buyer", seller: "Seller", admin: "Admin"};
 const NAV = {
-  buyer: [["browse", "Browse surplus"], ["match", "Order and match"], ["deals", "My deals"], ["pickup", "Pickup and delivery"]],
+  buyer: [["post", "Post a requirement", null, "Marketplace"], ["browse", "Browse surplus"], ["match", "Order and match"],
+    ["reqs", "My requirements", null, "My orders"], ["deals", "My deals"], ["pickup", "Pickup and delivery"]],
   seller: [["connect", "Connect your system"], ["gapfill", "Sold before it's cut", "durable"], ["offers", "Offers and recovery plan"], ["stock", "Stock and passports"], ["pickup", "Pickup and delivery"]],
   admin: [["monitor", "Deal monitor"], ["quality", "Data quality"], ["prices", "Price references"], ["rules", "Rules"], ["sim", "Simulation lab"]],
 };
 const TITLES = {
   connect: ["Connect your system", "Import from ERP or POS export (CSV). Upload the stock file your system exports; the engine checks every row and finds the surplus."],
+  post: ["Post a requirement", "Say what you need. Find it now in every seller's stock, or keep it open as a standing order for workshops about to cut."],
+  reqs: ["My requirements", "Everything you posted, with its status. Find it again or close it."],
   browse: ["Browse surplus", "Every piece and lot on offer, drawn to scale, with its seller, distance and price range."],
   pickup: ["Pickup and delivery", "Route, vehicle and transport cost come from the engine. Book a slot, print the papers, track the deal."],
   match: ["Order and match", "Say what you need. The engine checks every seller's stock, nests the parts and finds the cheapest pickup."],
@@ -43,7 +46,7 @@ const TITLES = {
 };
 const st = {lane: "durable", role: "seller", view: "gapfill", scen: {durable: "steel", fresh: "food"}, ord: {}, rate: {}, off: {},
   plan: {rejected: [], elapsed: 0, key: null}, deadline: {}, gf: null, gfDeclined: [], sellerFilter: "", lastDeal: null,
-  imp: {durable: {}, fresh: {}},
+  imp: {durable: {}, fresh: {}}, ordId: {}, postKind: "flat", post: {flat: null, linear: null, perishable: null}, postErr: {}, postMsg: null,
   man: {durable: {material: "mild_steel", length_mm: "", width_mm: "", thickness_mm: "", grade: "E250", condition: "good", is_full_sheet: false, days_unused: "", seller_id: ""},
     fresh: {product: "", category: "vegetables", quantity_kg: "", storage: "ambient", hours_left: "", use_by: "", mode: "hours", seller_id: ""}},
   manPhoto: {durable: null, fresh: null}, manErr: {durable: {}, fresh: {}}, manRes: {durable: null, fresh: null}, manMeasured: {durable: false, fresh: false}, br: {durable: {q: "", mat: "", thick: "", seller: "", sort: "distance"}, fresh: {q: "", mat: "", thick: "", seller: "", sort: "hours"}}, impLimit: {days: 30, hours: 24}, impMeasured: false,
@@ -67,8 +70,8 @@ function shell() {
   $("#lane").className = "seg " + LANES[st.lane].cls;
   $("#lane").innerHTML = Object.entries(LANES).map(([k, v]) => `<button type="button" data-lane="${k}" aria-pressed="${k === st.lane}">${v.name}</button>`).join("");
   $("#role").innerHTML = Object.entries(ROLES).map(([k, v]) => `<button type="button" data-role="${k}" aria-pressed="${k === st.role}">${v}</button>`).join("");
-  $("#nav").innerHTML = `<h6>${ROLES[st.role]} · ${LANES[st.lane].name}</h6>` + navFor(st.role, st.lane).map(([k, t]) =>
-    `<button type="button" data-view="${k}" ${k === st.view ? 'aria-current="page"' : ""}>${esc(t)}</button>`).join("") +
+  $("#nav").innerHTML = `<h6>${ROLES[st.role]} · ${LANES[st.lane].name}</h6>` + navFor(st.role, st.lane).map(([k, t, , grp]) =>
+    `${grp ? `<h6 class="grp">${esc(grp)}</h6>` : ""}<button type="button" data-view="${k}" ${k === st.view ? 'aria-current="page"' : ""}>${esc(t)}</button>`).join("") +
     (st.role === "seller" && st.lane === "fresh" ? `<p class="railnote">Sold before it's cut applies to sheet cutting, so it lives in the Durable lane.</p>` : "");
 }
 document.addEventListener("click", e => {
@@ -146,6 +149,128 @@ function becomeHtml(b, top) {
     ${shown.length ? shown.map(card).join("") : `<p class="note">Nothing in this lane can use it right now.</p>`}
     ${more.length ? `<details><summary>${more.length} more option(s)</summary>${more.map(card).join("")}</details>` : ""}
     ${b.refused.length ? `<details><summary>Not possible (${b.refused.length})</summary><ul class="rej">${b.refused.map(r => `<li><b>${esc(r.label)}: ${esc(r.part_name)}</b> ${esc(r.reason)}</li>`).join("")}</ul></details>` : ""}</div>`;
+}
+
+/* ---------------- Buyer: post a requirement, and my requirements ---------------- */
+function postDefaults(kind, O) {
+  if (kind === "perishable") return {categories: ["vegetables"], quantity: "", storage_available: ["ambient"], min_hours_left_on_arrival: "6",
+    buyer_type: "business", normal_price_per_kg: String(O.food_price ?? ""), buyer_fssai_licensed: false, needed_by: "", buyer_name: "",
+    x_km: String(O.centre.food[0]), y_km: String(O.centre.food[1])};
+  if (kind === "linear") { const pr = O.profiles[0];
+    return {part_name: "", profile: pr.profile, cut_length_mm: "", quantity: "", accepted_grades: [O.bar_grades[0]], accepted_conditions: [...O.default_conditions],
+      new_price_per_kg: String(pr.sample_price ?? ""), needed_by: "", buyer_name: "", x_km: String(O.centre.bars[0]), y_km: String(O.centre.bars[1])}; }
+  const m = O.materials.find(x => x.key === "mild_steel");
+  return {part_name: "", material: "mild_steel", length_mm: "", width_mm: "", thickness_mm: "", accepted_grades: m.grades.slice(0, 1), accepted_conditions: [...O.default_conditions],
+    quantity: "", new_price_per_kg: String(m.sample_price ?? ""), needed_by: "", buyer_name: "", x_km: String(O.centre.steel[0]), y_km: String(O.centre.steel[1])};
+}
+async function vPost(el) {
+  const O = await api("/api/requirements/options"), lane = st.lane;
+  const kind = lane === "fresh" ? "perishable" : st.postKind === "linear" ? "linear" : "flat";
+  const F = st.post[kind] || (st.post[kind] = postDefaults(kind, O)), E = st.postErr;
+  const bad = k => E[k] ? 'aria-invalid="true"' : "";
+  const err = k => `<span class="ferr" id="perr-${k}">${esc(E[k] || "")}</span>`;
+  const fld = (k, label, input, cls = "") => `<label class="field mfield ${cls}">${label}${input}${err(k)}</label>`;
+  const grp = (k, label, input, cls = "") => `<div class="field mfield ${cls}" role="group" aria-label="${esc(label)}"><span>${label}</span>${input}${err(k)}</div>`;
+  const num_ = (k, mode = "decimal", ph = "") => `<input data-post="${k}" type="number" inputmode="${mode}" ${mode === "numeric" ? 'pattern="[0-9]*" step="1"' : 'step="any"'} min="0" placeholder="${ph}" value="${esc(F[k])}" ${bad(k)}>`;
+  const txt = (k, ph = "") => `<input data-post="${k}" type="text" placeholder="${esc(ph)}" value="${esc(F[k])}" ${bad(k)}>`;
+  const chips = (k, opts) => `<div class="chips">${opts.map(([v, t]) => `<label><input type="checkbox" data-chip="${k}" value="${esc(v)}" ${F[k].includes(v) ? "checked" : ""}>${esc(t)}</label>`).join("")}</div>`;
+  const words = v => v.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
+  const mat = O.materials.find(x => x.key === F.material);
+  let fields;
+  if (kind === "flat") fields = [
+    fld("part_name", "Part name", txt("part_name", "e.g. mounting bracket"), "wide"),
+    fld("material", "Material", `<select data-post="material" ${bad("material")}>${O.materials.map(m => `<option value="${m.key}" ${m.key === F.material ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>`),
+    fld("length_mm", "Length mm", num_("length_mm", "decimal", "e.g. 150")), fld("width_mm", "Width mm", num_("width_mm", "decimal", "e.g. 100")),
+    fld("thickness_mm", "Thickness mm", num_("thickness_mm", "decimal", "e.g. 2")), fld("quantity", "Quantity", num_("quantity", "numeric", "e.g. 50")),
+    grp("accepted_grades", "Accepted grades", mat && mat.grades.length ? chips("accepted_grades", mat.grades.map(g => [g, g])) : txt("grades_text", "Type grades, comma separated"), "wide"),
+    grp("accepted_conditions", "Accepted conditions", chips("accepted_conditions", O.conditions.map(c => [c, words(c)])), "wide")];
+  else if (kind === "linear") fields = [
+    fld("part_name", "Part name", txt("part_name", "e.g. baluster"), "wide"),
+    fld("profile", "Profile", `<select data-post="profile" ${bad("profile")}>${O.profiles.map(x => `<option value="${esc(x.profile)}" ${x.profile === F.profile ? "selected" : ""}>${esc(x.profile)} · ${num(x.mass_per_m_kg, 2)} kg/m</option>`).join("")}</select>`),
+    fld("cut_length_mm", "Cut length mm", num_("cut_length_mm", "decimal", "e.g. 450")), fld("quantity", "Quantity", num_("quantity", "numeric", "e.g. 30")),
+    grp("accepted_grades", "Accepted grades", chips("accepted_grades", O.bar_grades.map(g => [g, g])), "wide"),
+    grp("accepted_conditions", "Accepted conditions", chips("accepted_conditions", O.conditions.map(c => [c, words(c)])), "wide")];
+  else fields = [
+    grp("categories", "What is needed", chips("categories", O.categories.map(c => [c, words(c)])), "wide"),
+    fld("quantity", "Kg", num_("quantity", "decimal", "e.g. 20")), fld("min_hours_left_on_arrival", "Minimum hours of shelf life on arrival", num_("min_hours_left_on_arrival", "decimal", "e.g. 6")),
+    grp("storage_available", "Storage you have", chips("storage_available", O.storage.map(c => [c, words(c)])), "wide"),
+    grp("buyer_type", "Buyer type", `<div class="opts">${O.buyer_types.map(b => `<label><input type="radio" name="postBt" value="${b.key}" ${F.buyer_type === b.key ? "checked" : ""}>${esc(b.name)}</label>`).join("")}</div>`, "wide")];
+  const priceLabel = kind === "perishable" ? "What you pay your usual supplier ₹/kg" : "What you pay for new material ₹/kg";
+  const priceNote = kind === "perishable" && F.buyer_type === "food_bank" ? "A donation: no price is charged." : "Prefilled with the cluster's sample price. Change it to what you really pay.";
+  fields.push(
+    kind === "perishable" && F.buyer_type === "food_bank" ? "" : fld(kind === "perishable" ? "normal_price_per_kg" : "new_price_per_kg", priceLabel, num_(kind === "perishable" ? "normal_price_per_kg" : "new_price_per_kg", "decimal")),
+    kind === "perishable" && F.buyer_type !== "food_bank" ? `<label class="check mfield"><input type="checkbox" data-post-check="buyer_fssai_licensed" ${F.buyer_fssai_licensed ? "checked" : ""}> We hold an FSSAI licence or registration</label>` : "",
+    fld("needed_by", "Needed by", `<input data-post="needed_by" type="date" min="${new Date().toISOString().slice(0, 10)}" value="${esc(F.needed_by)}" ${bad("needed_by")}>`),
+    fld("buyer_name", "Your business name", txt("buyer_name", "e.g. Workshop W"), "wide"),
+    fld("x_km", "Location x km", num_("x_km", "decimal")), fld("y_km", "Location y km", num_("y_km", "decimal")));
+  const msg = st.postMsg && st.postMsg.lane === lane ? `<div class="mres ok" role="status"><b>Saved as a standing order: ${esc(st.postMsg.demand_id)}</b><p>It now appears in Seller &gt; Sold before it's cut and in "What can this become?" as "Ordered by ${esc(st.postMsg.buyer)}".</p><div class="ctrl"><button class="btn sm" type="button" id="toReqs">See My requirements</button></div></div>` : "";
+  el.innerHTML = `<div class="card manual"><div class="ctrl"><h2>Your requirement</h2>${chip("sample")}<div class="grow"></div>
+      ${lane === "durable" ? `<div class="opts kindsw" role="radiogroup" aria-label="What kind of part"><label><input type="radio" name="postKind" value="flat" ${kind === "flat" ? "checked" : ""}>Sheet parts</label><label><input type="radio" name="postKind" value="linear" ${kind === "linear" ? "checked" : ""}>Bars and tubes</label></div>` : ""}</div>
+    <p class="mut">Checked with the same order rules the engine uses. Location is km on the demo grid; the default is near the centre of the cluster.</p>
+    <form id="postForm" novalidate><div class="mgrid">${fields.join("")}</div>
+      ${E.kind || E.standing ? `<p class="err">${esc(E.kind || E.standing)}</p>` : ""}
+      <div class="ctrl"><button class="btn pri bigbtn" type="submit" id="postFind">Find it now</button>
+        ${kind === "flat" ? `<button class="btn bigbtn" type="button" id="postStanding">Keep it open as a standing order</button>` : ""}
+        <span class="note">${esc(priceNote)}</span></div></form>${msg}</div>`;
+  const form = $("#postForm", el);
+  form.querySelectorAll("[data-post]").forEach(i => { i.oninput = i.onchange = () => {
+    F[i.dataset.post] = i.value;
+    if (i.dataset.post === "material") {  // new material: its grades and sample price
+      const m = O.materials.find(x => x.key === i.value);
+      F.accepted_grades = m.grades.slice(0, 1); F.new_price_per_kg = String(m.sample_price ?? "");
+      const c = O.centre[i.value === "mild_steel" ? "steel" : "sheets"]; F.x_km = String(c[0]); F.y_km = String(c[1]);
+      render();
+    }
+    if (i.dataset.post === "profile") { const pr = O.profiles.find(x => x.profile === i.value); F.new_price_per_kg = String(pr.sample_price ?? ""); }
+  }; });
+  form.querySelectorAll("[data-chip]").forEach(i => i.onchange = () => {
+    const k = i.dataset.chip; F[k] = i.checked ? [...new Set([...F[k], i.value])] : F[k].filter(v => v !== i.value);
+  });
+  form.querySelectorAll("[data-post-check]").forEach(i => i.onchange = () => { F[i.dataset.postCheck] = i.checked; });
+  form.querySelectorAll('input[name="postBt"]').forEach(i => i.onchange = () => { F.buyer_type = i.value; render(); });
+  el.querySelectorAll('input[name="postKind"]').forEach(i => i.onchange = () => { st.postKind = i.value; st.postErr = {}; render(); });
+  const tr = $("#toReqs", el); if (tr) tr.onclick = () => go({view: "reqs"});
+  const send = async standing => {
+    const fields = {...F}, needed_by = F.needed_by || null;
+    delete fields.needed_by;
+    if (kind === "flat" && fields.grades_text !== undefined) { fields.accepted_grades = fields.grades_text.split(",").map(x => x.trim()).filter(Boolean); delete fields.grades_text; }
+    if (kind === "linear") { const pr = O.profiles.find(x => x.profile === F.profile); fields.mass_per_m_kg = pr.mass_per_m_kg; fields.material = pr.material; }
+    if (kind === "perishable" && F.buyer_type === "food_bank") delete fields.normal_price_per_kg;
+    let r, t;
+    try { r = await fetch("/api/requirements", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({lane, kind, fields, needed_by, standing})}); t = await r.json().catch(() => ({})); }
+    catch (x) { st.postErr = {kind: "The app could not be reached. Check that it is still running and try again."}; return render(); }
+    if (!r.ok) { st.postErr = t.detail && t.detail.errors ? t.detail.errors : {kind: typeof t.detail === "string" ? t.detail : "Something went wrong."}; st.postMsg = null; await render();
+      const first = document.querySelector('#postForm [aria-invalid="true"], #postForm .ferr:not(:empty)'); if (first) (first.matches("input,select") ? first : first.parentElement.querySelector("input,select") || first).focus?.(); return; }
+    st.postErr = {}; st.post[kind] = null;
+    if (standing) { st.postMsg = {lane, demand_id: t.demand_id, buyer: t.demand.buyer_name}; return render(); }
+    st.postMsg = null; st.scen[lane] = t.scenario; st.ordId[t.scenario] = t.demand_id; st.off[t.scenario] = new Set();
+    go({view: "match"});
+  };
+  form.onsubmit = e => { e.preventDefault(); send(false); };
+  const sb = $("#postStanding", el); if (sb) sb.onclick = () => send(true);
+}
+async function vReqs(el) {
+  const r = await api(`/api/requirements?lane=${st.lane}`), list = r.requirements;
+  if (!list.length) {
+    el.innerHTML = `<div class="empty">No requirements yet. <a href="#buyer/post/${st.lane}" id="toPost">Post a requirement</a> and it will be listed here with its status.</div>`;
+    $("#toPost", el).onclick = e => { e.preventDefault(); go({view: "post"}); };
+    return;
+  }
+  const pill = {open: "p-mut", reserved: "p-warn", matched: "p-ok", closed: "p-mut"};
+  const what = q => { const d = q.demand;
+    return q.kind === "perishable" ? `${num(d.quantity, 1)} kg of ${d.categories.map(c => c.replace(/_/g, " ")).join(", ")} · ${d.storage_available.join(", ")} · ${num(d.min_hours_left_on_arrival)} h on arrival${d.buyer_type === "ngo" ? " · donation" : ""}`
+      : q.kind === "linear" ? `${num(d.quantity)} × ${esc(d.part_name)} · ${esc(d.profile)} · ${num(d.cut_length_mm)} mm`
+      : `${num(d.quantity)} × ${esc(d.part_name)} · ${num(d.length_mm)} × ${num(d.width_mm)} × ${num(d.thickness_mm, d.thickness_mm % 1 ? 1 : 0)} mm ${esc(d.material.replace(/_/g, " "))} · ${d.accepted_grades.map(esc).join("/")}`; };
+  el.innerHTML = `<div class="card"><div class="scroll"><table><tr><th>Id</th><th>Buyer</th><th>What</th><th>Needed by</th><th>Status</th><th class="noprint"></th></tr>${list.map(q => `<tr ${q.status === "closed" ? 'class="closed"' : ""}>
+      <td><code>${esc(q.demand_id)}</code>${q.standing ? '<div><span class="pill p-mut">Standing order</span></div>' : ""}</td><td>${esc(q.demand.buyer_name)}</td><td class="w">${what(q)}</td>
+      <td>${q.needed_by ? esc(q.needed_by) : "–"}</td><td class="w"><span class="pill ${pill[q.status]}">${esc(q.status)}</span><div class="note">${esc(q.status_text)}</div></td>
+      <td class="noprint"><span class="ctrl">${q.status !== "closed" ? `<button class="btn sm" type="button" data-find="${q.id}">Find again</button>` : ""}${q.status === "open" || q.status === "reserved" ? `<button class="btn sm" type="button" data-close="${q.id}">Close</button>` : ""}</span></td></tr>`).join("")}</table></div>
+    <p class="note">${esc(r.requirements[0].note)}. Reserved means a seller's Sold before it's cut plan includes your parts; if the seller declines, it goes back to Open.</p></div>`;
+  el.querySelectorAll("[data-find]").forEach(b => b.onclick = () => {
+    const q = list.find(x => x.id === +b.dataset.find);
+    st.scen[st.lane] = q.scenario; st.ordId[q.scenario] = q.demand_id; st.off[q.scenario] = new Set(); go({view: "match"});
+  });
+  el.querySelectorAll("[data-close]").forEach(b => b.onclick = async () => { await api(`/api/requirements/${b.dataset.close}/close`, {}); render(); });
 }
 
 /* ---------------- Buyer: browse surplus (marketplace listings) ---------------- */
@@ -255,7 +380,7 @@ async function vBrowse(el) {
     const b = e.target.closest("[data-order]");
     if (!b) return;
     const it = byUid[b.dataset.order], k = it.order.scenario, S = await scen(k);
-    st.scen[lane] = k; st.ord[k] = it.order.index;
+    st.scen[lane] = k; st.ordId[k] = it.order.demand_id;
     st.off[k] = new Set(S.data.sellers.map(x => x.id).filter(id => id !== (it.match_seller || it.seller_id)));
     go({view: "match"});
   });
@@ -265,11 +390,13 @@ async function vBrowse(el) {
 /* ---------------- Buyer: order and match ---------------- */
 async function vMatch(el) {
   const k = laneScen(), S = await scen(k), fresh = S.meta.engine === "perishable";
-  const i = Math.min(st.ord[k] ?? 0, S.data.demands.length - 1), d = S.data.demands[i];
+  const posted = (await api(`/api/requirements/demands/${k}`)).demands;  // the buyer's own requirements first
+  const allD = [...posted, ...S.data.demands];
+  const d = allD.find(x => x.id === st.ordId[k]) || allD[0];
   const off = st.off[k] || (st.off[k] = new Set());
   const rate = st.rate[k] ?? 1;
   const own = await api(`/api/own-stock/${k}`);  // imported, auto-synced and hand-entered items, as "Your workshop"
-  const D = own.resources.length ? {...S.data, sellers: [...S.data.sellers, own.seller], resources: [...S.data.resources, ...own.resources]} : S.data;
+  const D = {...S.data, demands: allD, ...(own.resources.length ? {sellers: [...S.data.sellers, own.seller], resources: [...S.data.resources, ...own.resources]} : {})};
   const data = structuredClone(D);
   data.transport.rate_multiplier = rate;
   const sellerIds = D.sellers.map(s => s.id).filter(id => !off.has(id));
@@ -277,7 +404,7 @@ async function vMatch(el) {
   let f, err;
   try { f = await api("/api/fulfil", {demand_id: d.id, data, seller_ids: sellerIds, allow_partial: true}); } catch (e) { err = e; }
   const ctrl = `<div class="card noprint"><div class="ctrl">${await scenSeg()}
-    <label class="field">Order<select id="ordSel">${S.data.demands.map((x, j) => `<option value="${j}" ${j === i ? "selected" : ""}>${esc(x.buyer_name)}: ${num(x.quantity, fresh ? 1 : 0)} ${esc(x.part_name)}</option>`).join("")}</select></label>
+    <label class="field">Order<select id="ordSel">${posted.length ? `<optgroup label="Your requirements">${posted.map(x => `<option value="${esc(x.id)}" ${x.id === d.id ? "selected" : ""}>${esc(x.id)} · ${esc(x.buyer_name)}: ${num(x.quantity, fresh ? 1 : 0)} ${esc(x.part_name)}${x.status === "matched" ? " (matched)" : ""}</option>`).join("")}</optgroup><optgroup label="Sample orders">` : ""}${S.data.demands.map(x => `<option value="${esc(x.id)}" ${x.id === d.id ? "selected" : ""}>${esc(x.buyer_name)}: ${num(x.quantity, fresh ? 1 : 0)} ${esc(x.part_name)}</option>`).join("")}${posted.length ? "</optgroup>" : ""}</select></label>
     <label class="field">Transport rate ×<input id="rate" type="number" min="0.2" max="5" step="0.1" value="${rate}"></label></div>
     <div class="ctrl"><span class="lbl">Sellers in the cluster</span>${D.sellers.map(s => `<label class="check"><input type="checkbox" data-seller="${esc(s.id)}" ${off.has(s.id) ? "" : "checked"}>${esc(s.name)}</label>`).join("")}</div></div>`;
   if (err) { el.innerHTML = ctrl + errBox(err); bind(); return; }
@@ -304,7 +431,7 @@ async function vMatch(el) {
   bind();
   function bind() {
     bindScen(el);
-    $("#ordSel", el).onchange = e => { st.ord[k] = +e.target.value; render(); };
+    $("#ordSel", el).onchange = e => { st.ordId[k] = e.target.value; render(); };
     $("#rate", el).onchange = e => { const x = +e.target.value; if (x > 0) { st.rate[k] = x; render(); } };
     el.querySelectorAll("[data-seller]").forEach(c => c.onchange = () => { c.checked ? off.delete(c.dataset.seller) : off.add(c.dataset.seller); render(); });
     const acc = $("#accept", el);
@@ -314,7 +441,7 @@ async function vMatch(el) {
         const deal = await api("/api/deals", {kind: S.meta.engine, counterfactual: b.counterfactual[0], demand_id: d.id, buyer_name: d.buyer_name,
           sellers: b.sellers_used, units: b.units, unit_name: f.unit_name, kg_in_units: b.kg_in_units, kg_shipped: b.kg_shipped,
           route_km: b.route_km, value_above_salvage: b.value.seller_gain_above_salvage, buyer_utilisation: d.buyer_utilisation ?? null,
-          scenario: k, rate_multiplier: rate});
+          scenario: k, rate_multiplier: rate, requirement_id: d.requirement_id ?? null});
         st.lastDeal = deal.id;
         $("#acceptMsg", el).innerHTML = `Deal ${deal.id} agreed (simulated). <a href="#buyer/deals/${st.lane}" id="toDeals">Track it in My deals</a> or <a href="#buyer/pickup/${st.lane}" id="toPickup">book the pickup</a>.`;
         $("#toDeals", el).onclick = ev => { ev.preventDefault(); go({view: "deals"}); };
@@ -603,9 +730,12 @@ function gField(label, path, type = "number", extra = "") {
   return `<label class="field">${label}<input data-gf="${path}" type="${type}" value="${esc(v)}" ${extra}></label>`;
 }
 async function vGap(el) {
-  if (!st.gf) st.gf = await api("/api/gapfill/demo");
+  const demo = await api("/api/gapfill/demo");  // sample orders plus standing orders buyers posted in this demo
+  if (!st.gf) st.gf = demo;
+  else st.gf.orders = [...st.gf.orders.filter(o => !o.posted), ...demo.orders.filter(o => o.posted)];
+  const postedTag = id => (st.gf.orders.find(o => o.id === id) || {}).posted ? ' <span class="pill p-warn">Posted by a buyer in this demo</span>' : "";
   let r, err;
-  try { r = await api("/api/gapfill", {...st.gf, declined_order_ids: st.gfDeclined}); } catch (e) { err = e; }
+  try { r = await api("/api/gapfill?record=true", {...st.gf, declined_order_ids: st.gfDeclined}); } catch (e) { err = e; }
   const ctrl = `<div class="card noprint"><div class="ctrl"><span class="lbl">Sheet</span>${gField("Length mm", "sheet.length_mm", "number", 'min="200" step="10"')}${gField("Width mm", "sheet.width_mm", "number", 'min="200" step="10"')}
     <label class="field">Thickness mm<select data-gf="sheet.thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === st.gf.sheet.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
     <label class="field">Grade<select data-gf="sheet.grade">${["E250", "E350"].map(g => `<option ${g === st.gf.sheet.grade ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
@@ -623,10 +753,10 @@ async function vGap(el) {
     <div class="leg"><span><i style="background:var(--own)"></i>Your ${esc(r.own.part_name)} × ${r.own.units}</span><span><i style="background:repeating-linear-gradient(45deg,var(--scrap),var(--scrap) 3px,var(--bg) 3px,var(--bg) 6px)"></i>Empty space (scrap)</span>${r.neighbours.map(n => `<span><i style="background:${colours[n.order_id]}"></i>${esc(n.order_id)} ${esc(n.buyer_name)}: ${esc(n.part_name)} × ${n.units}</span>`).join("")}</div>
     <div><h4>Value of the leftover</h4><div class="orow"><div>Sold as scrap</div><div class="bar"><i style="width:${mo.scrap_alone / mx * 100}%;background:var(--scrap)"></i></div><div class="v">${inr(mo.scrap_alone)}</div></div><div class="orow"><div>Sold before it's cut</div><div class="bar warn"><i style="width:${mo.total_with_gap_fill / mx * 100}%"></i></div><div class="v">${inr(mo.total_with_gap_fill)}</div></div>
     <p class="note">Before it's cut = neighbours' parts ${inr(mo.neighbours_value)} + scrap of what is still left ${inr(mo.scrap_of_rest)} − pickup ${inr(mo.pickup)}. Part values are what each buyer would pay for the same steel from a new sheet, less handling and cutting. All prices are sample data.</p></div></div>`;
-  h += `<div class="cols"><div class="card"><h2>Reserved for neighbours</h2>${r.neighbours.length ? `<div class="scroll"><table><tr><th>Order</th><th>Buyer</th><th>Part</th><th class="n">Parts</th><th class="n">Value</th><th class="noprint"></th></tr>${r.neighbours.map(n => `<tr><td><span class="dot" style="background:${colours[n.order_id]}"></span>${esc(n.order_id)}</td><td>${esc(n.buyer_name)}</td><td>${esc(n.part_name)}</td><td class="n">${n.units}</td><td class="n">${inr(n.value)}</td><td class="noprint"><button class="btn sm" data-decline="${esc(n.order_id)}" type="button">Decline</button></td></tr>`).join("")}</table></div>` : `<div class="empty">Nothing reserved. Filling the gap would not beat selling the leftover as scrap.</div>`}
+  h += `<div class="cols"><div class="card"><h2>Reserved for neighbours</h2>${r.neighbours.length ? `<div class="scroll"><table><tr><th>Order</th><th>Buyer</th><th>Part</th><th class="n">Parts</th><th class="n">Value</th><th class="noprint"></th></tr>${r.neighbours.map(n => `<tr><td><span class="dot" style="background:${colours[n.order_id]}"></span>${esc(n.order_id)}</td><td>${esc(n.buyer_name)}${postedTag(n.order_id)}</td><td>${esc(n.part_name)}</td><td class="n">${n.units}</td><td class="n">${inr(n.value)}</td><td class="noprint"><button class="btn sm" data-decline="${esc(n.order_id)}" type="button">Decline</button></td></tr>`).join("")}</table></div>` : `<div class="empty">Nothing reserved. Filling the gap would not beat selling the leftover as scrap.</div>`}
     <p class="note">If a buyer declines, the plan is recalculated at once and their space goes to the next best order.</p></div>
     <div class="card"><h2>Orders not used (${r.refused.length})</h2><ul class="rej">${r.refused.map(x => `<li><code>${esc(x.order_id)}</code> ${esc(x.reason)}${st.gfDeclined.includes(x.order_id) ? ` <button class="btn sm noprint" data-restore="${esc(x.order_id)}" type="button">Restore</button>` : ""}</li>`).join("") || "<li>None</li>"}</ul>
-    <h4>Standing orders in the cluster</h4><div class="scroll"><table><tr><th>Order</th><th>Buyer</th><th>Part mm</th><th class="n">t mm</th><th>Grades</th><th class="n">Qty</th></tr>${st.gf.orders.map(o => `<tr><td>${esc(o.id)}</td><td>${esc(o.buyer_name)}</td><td>${esc(o.part_name)} ${num(o.length_mm)}×${num(o.width_mm)}</td><td class="n">${num(o.thickness_mm)}</td><td>${o.accepted_grades.map(esc).join(", ")}</td><td class="n">${o.quantity}</td></tr>`).join("")}</table></div></div></div>`;
+    <h4>Standing orders in the cluster</h4><div class="scroll"><table><tr><th>Order</th><th>Buyer</th><th>Part mm</th><th class="n">t mm</th><th>Grades</th><th class="n">Qty</th></tr>${st.gf.orders.map(o => `<tr><td>${esc(o.id)}</td><td class="w">${esc(o.buyer_name)}${postedTag(o.id)}</td><td>${esc(o.part_name)} ${num(o.length_mm)}×${num(o.width_mm)}</td><td class="n">${num(o.thickness_mm)}</td><td>${o.accepted_grades.map(esc).join(", ")}</td><td class="n">${o.quantity}</td></tr>`).join("")}</table></div></div></div>`;
   el.innerHTML = h;
   bindG();
   function bindG() {
@@ -842,7 +972,7 @@ async function vSim(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();
