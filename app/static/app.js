@@ -118,13 +118,14 @@ const ROLES = {buyer: "Buyer", seller: "Seller", admin: "Admin"};
 // [view, title, icon, lane only]
 const NAV = {
   seller: [["My workshop", [["connect", "Connect your system", "plug"], ["gapfill", "Sold before it's cut", "scissors", "durable"], ["stock", "Stock and passports", "qr-code"], ["offers", "Offers and recovery plan", "route"]]],
-    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]]],
+    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]], ["Alerts", [["whatsapp", "WhatsApp alerts", "message-circle"]]]],
   buyer: [["Marketplace", [["post", "Post a requirement", "file-plus-2"], ["browse", "Browse surplus", "search"], ["match", "Order and match", "layers"]]],
     ["My orders", [["reqs", "My requirements", "clipboard-list"], ["deals", "My deals", "receipt"]]],
-    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]]],
-  admin: [["Platform", [["monitor", "Deal monitor", "gauge"], ["quality", "Data quality", "shield-check"], ["prices", "Price references", "banknote"], ["rules", "Rules", "list-checks"], ["sim", "Simulation lab", "flask-conical"]]]],
+    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]], ["Alerts", [["whatsapp", "WhatsApp alerts", "message-circle"]]]],
+  admin: [["Platform", [["monitor", "Deal monitor", "gauge"], ["quality", "Data quality", "shield-check"], ["prices", "Price references", "banknote"], ["rules", "Rules", "list-checks"], ["sim", "Simulation lab", "flask-conical"]]], ["Alerts", [["whatsapp", "WhatsApp alerts", "message-circle"]]]],
 };
 const TITLES = {
+  whatsapp: ["WhatsApp alerts", "Register a WhatsApp number and choose the alerts you want. CIRCULATE prepares each message; a person sends it with one click."],
   connect: ["Connect your system", "Bring in your stock from any ERP or billing software. The app checks every row and finds what is surplus."],
   post: ["Post a requirement", "Say what you need. Find it in sellers' stock today, or keep it open so a workshop can cut it from the spare part of its next sheet."],
   reqs: ["My requirements", "Everything you have posted, and where each one stands."],
@@ -148,6 +149,7 @@ const st = {lane: "durable", role: "seller", view: "welcome", scen: {durable: "s
     fresh: {product: "", category: "vegetables", quantity_kg: "", storage: "ambient", hours_left: "", use_by: "", mode: "hours", seller_id: ""}},
   manPhoto: {durable: null, fresh: null}, manErr: {durable: {}, fresh: {}}, manRes: {durable: null, fresh: null}, manMeasured: {durable: false, fresh: false},
   br: {durable: {q: "", mat: "", thick: "", seller: "", dist: "", sort: "distance"}, fresh: {q: "", mat: "", thick: "", seller: "", dist: "", sort: "hours"}}, impLimit: {days: 30, hours: 24}, impMeasured: false,
+  wa: {edit: null, err: {}, form: null},
   job: {sheet_length_mm: 2500, sheet_width_mm: 1250, thickness_mm: 6, grade: "E250", part_name: "base plate", part_length_mm: 450, part_width_mm: 350, quantity: 9}};
 
 function navFor(role, lane) { return NAV[role].flatMap(([, items]) => items).filter(n => !n[3] || n[3] === lane); }
@@ -1117,6 +1119,77 @@ async function vSim(el) {
   <div class="card"><h2>Assumptions</h2><div class="scroll"><table><tr><th>Input</th><th>Value</th><th>Status</th></tr><tr><td>Sheet, kerf, edge margin</td><td>2500 × 1250 mm, 3 mm, 10 mm</td><td>Typical</td></tr><tr><td>New plate / scrap</td><td>₹65/kg / ₹32/kg</td><td>${chip("assumption")}</td></tr><tr><td>Handling, cutting, pickup</td><td>₹2 per part, ₹6 per m, ₹300 per run</td><td>${chip("assumption")}</td></tr><tr><td>Demand</td><td>13 part types, five demand levels</td><td>${chip("sample")}</td></tr></table></div><p class="note">Source: research/gap_fill_sim.py. Run it again with real prices to update these figures.</p></div>`;
 }
 
+/* ---------------- WhatsApp alerts: register numbers (no automatic sending) ---------------- */
+const WA_ROLES = {seller: ["seller"], buyer: ["buyer", "food bank"], admin: null};
+async function vWhatsapp(el) {
+  const R = await api("/api/whatsapp/contacts"), W = st.wa, E = W.err;
+  const mine = WA_ROLES[st.role], list = R.contacts.filter(c => !mine || mine.includes(c.role));
+  const edit = W.edit != null ? R.contacts.find(c => c.id === W.edit) : null;
+  const known = R.businesses.map(b => b.name);
+  if (!W.form || W.form._for !== (edit ? edit.id : "new")) {
+    const role = edit ? edit.role : (st.role === "seller" ? "seller" : st.role === "buyer" ? "buyer" : "seller");
+    const business = edit ? edit.business : (R.businesses.find(b => b.role === role) || {}).name || "";
+    W.form = {_for: edit ? edit.id : "new", business: known.includes(business) ? business : "__other", other: known.includes(business) ? "" : business,
+      role, name: edit ? edit.name : "", phone: "", alerts: edit ? [...edit.alerts] : [...R.default_alerts[role]], consent: false};
+  }
+  const F = W.form, bad = k => E[k] ? 'aria-invalid="true"' : "", err = k => `<span class="ferr" id="werr-${k}">${esc(E[k] || "")}</span>`;
+  const lan = /^(localhost|127\.|\[::1\])/.test(location.hostname);
+  const regUrl = `${location.origin}/register`;
+  const form = `<form id="waForm" class="form" novalidate><div class="mgrid">
+      <label class="field mfield">Business<select data-wa="business" ${bad("business")}>${R.businesses.map(b => `<option value="${esc(b.name)}" ${F.business === b.name ? "selected" : ""}>${esc(b.name)}</option>`).join("")}<option value="__other" ${F.business === "__other" ? "selected" : ""}>Other</option></select>${F.business === "__other" ? "" : err("business")}</label>
+      ${F.business === "__other" ? `<label class="field mfield">Business name<input data-wa="other" type="text" autocomplete="organization" value="${esc(F.other)}" ${bad("business")}>${err("business")}</label>` : ""}
+      <label class="field mfield">Role<select data-wa="role" ${bad("role")}>${R.roles.map(r => `<option value="${r}" ${F.role === r ? "selected" : ""}>${cap1(r)}</option>`).join("")}</select>${err("role")}</label>
+      <label class="field mfield">Contact name<input data-wa="name" type="text" autocomplete="name" placeholder="e.g. Ravi" value="${esc(F.name)}" ${bad("name")}>${err("name")}</label>
+      <label class="field mfield">WhatsApp number<input data-wa="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="${edit ? `Leave empty to keep ${esc(edit.phone)}` : "98765 43210"}" value="${esc(F.phone)}" ${bad("phone")}>${err("phone")}</label>
+      <div class="field mfield wide" role="group" aria-label="Alerts"><span>Alerts to receive</span><div class="chips">${Object.entries(R.alert_types).map(([k, t]) => `<label><input type="checkbox" data-wa-alert="${k}" ${F.alerts.includes(k) ? "checked" : ""}>${esc(t)}</label>`).join("")}</div>${err("alerts")}</div>
+      ${edit ? "" : `<label class="check mfield wide"><input type="checkbox" data-wa-consent ${F.consent ? "checked" : ""}> ${esc(R.consent_text)}</label>${err("consent")}`}</div>
+    <div class="actions"><button class="btn pri" type="submit">${ic(edit ? "circle-check" : "plus")}${edit ? "Save changes" : "Register this number"}</button>${edit ? `<button class="btn" type="button" id="waCancel">Cancel</button>` : ""}
+      <p class="note">A 10-digit number gets India's code 91. Alerts are prepared in CIRCULATE; a person opens each one in WhatsApp and presses send. Nothing is sent automatically.</p></div></form>`;
+  const row = c => `<div class="wa-row ${c.active ? "" : "paused"}"><span class="wa-ic">${ic("message-circle")}</span>
+      <div class="nm"><b>${esc(c.name)}</b> <span class="pill ${c.role === "seller" ? "p-np" : c.role === "food bank" ? "p-pe" : "p-mut"}">${esc(c.role)}</span>${c.active ? "" : ' <span class="pill p-warn">Paused</span>'}
+        <span class="note">${esc(c.business)} · <span class="num">${esc(c.phone)}</span></span>
+        <span class="note">${c.alerts.map(a => esc(R.alert_types[a])).join(" · ")}</span></div>
+      <div class="ctrl"><button class="btn sm" type="button" data-wa-edit="${c.id}">${ic("pencil", "sm")}Edit</button><button class="btn sm" type="button" data-wa-toggle="${c.id}" data-active="${c.active ? 1 : 0}">${ic(c.active ? "pause" : "play", "sm")}${c.active ? "Pause" : "Resume"}</button><button class="btn sm ghost" type="button" data-wa-remove="${c.id}">${ic("trash-2", "sm")}Remove</button></div></div>`;
+  el.innerHTML = `<div class="cols wa-cols"><div class="card"><div class="ctrl"><h2>${edit ? `Edit ${esc(edit.name)}` : "Register a number"}</h2>${badge("sample", "Demo")}</div>${form}</div>
+    <div class="card"><div class="ctrl"><h2>Register from your phone</h2></div>
+      <div class="qrbox"><img alt="QR code that opens the registration page" src="/api/qr.svg?data=${encodeURIComponent(regUrl)}"><div class="stack" style="gap:6px"><p>Scan to open a phone-friendly form and register your own WhatsApp number.</p><p class="note">Your phone must be on the same Wi-Fi as this laptop.</p><p class="note"><span class="num">${esc(regUrl)}</span></p></div></div>
+      ${lan ? `<p class="why">${ic("info", "sm")}<span>This page is open at ${esc(location.hostname)}, so the QR code only works on this laptop. Start the app with <code>--host 0.0.0.0</code> and open it at the laptop's network address.</span></p>` : ""}</div></div>
+    <div class="card"><div class="section-title"><h2>Registered numbers (${list.length})</h2><span class="mut">${mine ? `Showing ${mine.join(" and ")} contacts. There is no login in this demo, so each role sees its own kind of business; Admin sees all.` : "All contacts."}</span></div>
+      ${list.length ? `<div class="olist">${list.map(row).join("")}</div>` : emptyState("message-circle", "No numbers registered yet. Register one with the form, or scan the QR code with your phone.")}
+      <p class="note">Numbers are shown masked except the last 4 digits. Pausing stops new alerts for that number; removing it also drops its unsent alerts.</p></div>`;
+  const form$ = $("#waForm", el);
+  form$.querySelectorAll("[data-wa]").forEach(i => i.oninput = i.onchange = () => {
+    const k = i.dataset.wa; F[k] = i.value;
+    if (k === "business") { const b = R.businesses.find(x => x.name === i.value); if (b && !edit) { F.role = b.role; F.alerts = [...R.default_alerts[b.role]]; } render(); }
+    if (k === "role" && !edit) { F.alerts = [...R.default_alerts[i.value]]; render(); }
+  });
+  form$.querySelectorAll("[data-wa-alert]").forEach(i => i.onchange = () => { const a = i.dataset.waAlert; F.alerts = i.checked ? [...new Set([...F.alerts, a])] : F.alerts.filter(x => x !== a); });
+  const cs = form$.querySelector("[data-wa-consent]"); if (cs) cs.onchange = () => { F.consent = cs.checked; };
+  const cancel = $("#waCancel", el); if (cancel) cancel.onclick = () => { W.edit = null; W.err = {}; W.form = null; render(); };
+  form$.onsubmit = async e => {
+    e.preventDefault();
+    const body = {business: F.business === "__other" ? F.other : F.business, role: F.role, name: F.name, alerts: F.alerts};
+    if (!edit || F.phone.trim()) body.phone = F.phone;
+    if (!edit) body.consent = F.consent;
+    let r, t;
+    try { r = await fetch(edit ? `/api/whatsapp/contacts/${edit.id}` : "/api/whatsapp/contacts", {method: edit ? "PATCH" : "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}); t = await r.json().catch(() => ({})); }
+    catch (x) { toast("The app could not be reached. Check that it is still running, then try again.", "bad"); return; }
+    if (!r.ok) { W.err = (t.detail && t.detail.errors) || {}; if (!t.detail || !t.detail.errors) toast(esc(typeof t.detail === "string" ? t.detail : "Something went wrong. Try again."), "bad"); await render(); const f = document.querySelector('#waForm [aria-invalid="true"]'); if (f) f.focus(); return; }
+    toast(edit ? `Saved changes for ${esc(t.name)}.` : `Registered ${esc(t.phone)} for ${esc(short(t.business))}.`);
+    W.edit = null; W.err = {}; W.form = null; render();
+  };
+  el.querySelectorAll("[data-wa-edit]").forEach(b => b.onclick = () => { W.edit = +b.dataset.waEdit; W.err = {}; W.form = null; render(); window.scrollTo({top: 0}); });
+  el.querySelectorAll("[data-wa-toggle]").forEach(b => b.onclick = async () => {
+    const on = b.dataset.active === "1"; await api(`/api/whatsapp/contacts/${b.dataset.waToggle}`, undefined, "PATCH", {active: !on});
+    toast(on ? "Paused. No new alerts will be prepared for this number." : "Resumed."); render();
+  });
+  el.querySelectorAll("[data-wa-remove]").forEach(b => b.onclick = async () => {
+    if (!confirm("Remove this number? Its unsent alerts are removed too.")) return;
+    await fetch(`/api/whatsapp/contacts/${b.dataset.waRemove}`, {method: "DELETE"}); if (W.edit === +b.dataset.waRemove) { W.edit = null; W.form = null; }
+    toast("Number removed."); render();
+  });
+}
+
 /* ---------------- Welcome ---------------- */
 const MARK = `<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><rect x="8.5" y="13" width="5" height="6" rx=".5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.6 1.4" opacity=".7"/><rect x="17" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" opacity=".55"/><rect x="19.5" y="11" width="6" height="7" rx="1" fill="#f2a33a"/><path d="M13 21.5h4.2" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round"/><path d="M15.6 19.9l1.8 1.6-1.8 1.6" fill="none" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 async function vWelcome(el) {
@@ -1140,7 +1213,7 @@ async function vWelcome(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {welcome: vWelcome, post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {welcome: vWelcome, whatsapp: vWhatsapp, post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();

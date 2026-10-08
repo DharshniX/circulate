@@ -448,3 +448,14 @@ input[type=date]{font-family:var(--mono)}
 .statrow.tight .stat{min-width:0}
 .statrow.tight .stat b{font-size:var(--fs-16);line-height:var(--lh-16)}
 .card>.fold:first-child{border-top:none;padding-top:0}
+
+/* ---------- WhatsApp alerts ---------- */
+.wa-cols{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr)}
+.wa-row{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:var(--s2);align-items:center;padding:14px 0;border-bottom:1px solid var(--line)}
+.wa-row:last-child{border-bottom:none}
+.wa-row .nm{display:flex;flex-direction:column;gap:4px;min-width:0}
+.wa-row .nm b{font-weight:600}
+.wa-row.paused{opacity:.7}
+.wa-ic{width:40px;height:40px;border-radius:999px;background:var(--panel-2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;color:var(--mut)}
+@media(max-width:1100px){.wa-cols{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:860px){.wa-row{grid-template-columns:40px minmax(0,1fr)}.wa-row>.ctrl{grid-column:1/-1}}

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 
@@ -33,6 +33,7 @@ from engine.gapfill import GapFillRequest, plan_gap_fill
 from engine.impact import DealImpactInput, EmissionFactor, compute
 from engine import connectors as CN
 from engine import importer as IMP
+from engine import messages as MSG
 from engine.models import Demand, PlanRequest, Resource, Seller, Settings, Transport
 from engine.pooling import _dist, fulfil
 from engine.recovery import plan
@@ -72,6 +73,13 @@ def db():
         needed_by TEXT, standing INTEGER, status TEXT, deal_id INTEGER, history TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS reservations (
         req_id INTEGER PRIMARY KEY, seller TEXT, parts INTEGER, at TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS whatsapp_contacts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, business TEXT, role TEXT, name TEXT, phone TEXT, alerts TEXT,
+        consent_at TEXT, active INTEGER, created_at TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS notifications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, event TEXT, deal_id INTEGER, item_id TEXT, contact_id INTEGER,
+        text TEXT, link TEXT, status TEXT, opened_at TEXT, sent_at TEXT)""")
+    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_notifications ON notifications(event, IFNULL(deal_id, 0), IFNULL(item_id, ''), contact_id)")
     con.execute("""CREATE TABLE IF NOT EXISTS sync_folders (
         lane TEXT PRIMARY KEY, path TEXT, enabled INTEGER, measured INTEGER, days_unused_limit INTEGER, hours_left_limit REAL)""")
     con.execute("""CREATE TABLE IF NOT EXISTS sync_seen (
@@ -185,7 +193,7 @@ def gapfill_demo():
 
 
 @app.post("/api/gapfill")
-def api_gapfill(req: GapFillRequest, record: bool = False, seller: str = "Your workshop"):
+def api_gapfill(req: GapFillRequest, request: Request, record: bool = False, seller: str = "Your workshop"):
     """record=true (the Sold before it's cut screen): posted requirements in the plan are marked reserved
     by this seller; posted ones declined or left out go back to open."""
     try:
@@ -194,6 +202,7 @@ def api_gapfill(req: GapFillRequest, record: bool = False, seller: str = "Your w
         _bad(e)
     if record:
         _record_reservations(req, plan, seller)
+        _safely(_notify_gapfill, plan, {o.id: o for o in req.orders}, _origin(request), seller)
     return plan
 
 
@@ -235,7 +244,7 @@ def api_plan(req: PlanRequest):
 
 
 @app.post("/api/deals")
-def create_deal(d: NewDeal):
+def create_deal(d: NewDeal, request: Request):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(db()) as con, con:
         cur = con.execute(
@@ -252,11 +261,13 @@ def create_deal(d: NewDeal):
                             (cur.lastrowid, json.dumps(json.loads(row["history"]) + [{"at": now, "status": "matched", "deal": cur.lastrowid}]),
                              d.requirement_id))
                 con.execute("DELETE FROM reservations WHERE req_id=?", (d.requirement_id,))
-        return {"id": cur.lastrowid, "status": "agreed"}
+        new_id = cur.lastrowid
+    _safely(_notify_deal, "order_accepted", new_id, _origin(request))
+    return {"id": new_id, "status": "agreed"}
 
 
 @app.post("/api/deals/{deal_id}/advance")
-def advance(deal_id: int, a: Advance):
+def advance(deal_id: int, a: Advance, request: Request):
     order = {"agreed": 0, "dispatched": 1, "delivered": 2}
     with closing(db()) as con, con:
         row = con.execute("SELECT * FROM deals WHERE id=?", (deal_id,)).fetchone()
@@ -271,6 +282,8 @@ def advance(deal_id: int, a: Advance):
         con.execute("UPDATE deals SET status=?, evidence=?, buyer_confirmed=?, history=? WHERE id=?",
                     (a.status, json.dumps(json.loads(row["evidence"]) + a.evidence),
                      int(a.buyer_confirmed or row["buyer_confirmed"]), json.dumps(hist), deal_id))
+    if a.status == "delivered":
+        _safely(_notify_deal, "delivered", deal_id, _origin(request))
     return {"id": deal_id, "status": a.status}
 
 
@@ -371,7 +384,9 @@ def _stock(key: str) -> list[dict]:
 
 
 @app.get("/api/stock/{key}")
-def stock(key: str):
+def stock(key: str, request: Request):
+    if key in ("food", "import_fresh"):
+        _safely(_sweep_fresh, _origin(request))
     return {"scenario": key, "items": _stock(key)}
 
 
@@ -764,7 +779,7 @@ def _browse_imported(lane: str) -> list[dict]:
 
 
 @app.get("/api/browse/{lane}")
-def browse(lane: Literal["durable", "fresh"]):
+def browse(lane: Literal["durable", "fresh"], request: Request):
     """Every stock item in this lane as a marketplace listing: sample scenarios plus stock listed from a CSV import."""
     items, buyers = [], {}
     for key, sc in SC.SCENARIOS.items():
@@ -772,6 +787,8 @@ def browse(lane: Literal["durable", "fresh"]):
             rows, buyers[key] = _browse_scenario(key)
             items += rows
     items += _browse_imported(lane)
+    if lane == "fresh":
+        _safely(_sweep_fresh, _origin(request))
     for it in items:
         it["illustrative"] = _illustrative(it)
     return {"lane": lane, "items": items, "distance_from": buyers}
@@ -885,7 +902,7 @@ def deal_logistics(deal_id: int, now: datetime | None = None):
 
 
 @app.post("/api/deals/{deal_id}/booking")
-def book_pickup(deal_id: int, bk: Booking):
+def book_pickup(deal_id: int, bk: Booking, request: Request):
     row = _deal_row(deal_id)
     if row["status"] != "agreed":
         raise HTTPException(409, f"the goods are already {row['status']}; a pickup can only be booked before collection")
@@ -897,7 +914,9 @@ def book_pickup(deal_id: int, bk: Booking):
                     (json.dumps({"date": bk.pickup_date.isoformat(), "slot": bk.slot, "booked_at": now}),
                      json.dumps(json.loads(row["history"]) + [{"at": now, "status": "pickup booked", "slot": f"{bk.pickup_date} {bk.slot}"}]),
                      deal_id))
-    return _logistics(_deal_row(deal_id))
+    lg = _logistics(_deal_row(deal_id))
+    _safely(_notify_deal, "pickup_booked", deal_id, _origin(request), lg)
+    return lg
 
 
 def _doc(title: str, body: str) -> str:
@@ -1548,7 +1567,7 @@ def requirement_options():
 
 
 @app.post("/api/requirements")
-def post_requirement(r: RequirementIn):
+def post_requirement(r: RequirementIn, request: Request):
     """Check a buyer's requirement with the demand models and save it (as a standing order if asked)."""
     demand, key, errors = _build_demand(r)
     if errors:
@@ -1561,6 +1580,7 @@ def post_requirement(r: RequirementIn):
         rid = cur.lastrowid
         demand = demand.model_copy(update={"id": f"R{rid}"})
         con.execute("UPDATE requirements SET demand=? WHERE id=?", (demand.model_dump_json(), rid))
+    _safely(_notify_requirement_fit, demand, key, r.standing, _origin(request))
     return _public(next(x for x in _requirements(include_closed=True) if x["id"] == rid))
 
 
@@ -1588,3 +1608,351 @@ def close_requirement(req_id: int):
                     (json.dumps(json.loads(row["history"]) + [{"at": now, "status": "closed"}]), req_id))
         con.execute("DELETE FROM reservations WHERE req_id=?", (req_id,))
     return {"id": req_id, "status": "closed"}
+
+
+# ---------------- WhatsApp alerts: prepared automatically, sent by a person with one click ----------------
+# Nothing is sent by CIRCULATE. A notification is a ready message and a wa.me link; a person opens it and
+# presses send in WhatsApp. Statuses only record what that person did: opened, marked as sent, skipped.
+ALERT_TYPES = {"new_match": "New matching order", "order_accepted": "Order accepted", "pickup_booked": "Pickup booked",
+               "delivered": "Delivered", "fresh": "Fresh food near its use-by"}
+CONTACT_ROLES = ("seller", "buyer", "food bank")
+DEFAULT_ALERTS = {"seller": ["new_match", "pickup_booked"], "buyer": ["order_accepted", "pickup_booked", "delivered", "fresh"],
+                  "food bank": ["order_accepted", "pickup_booked", "delivered", "fresh"]}
+STATUS_TEXT = {"ready": "Ready to send", "opened": "Opened in WhatsApp", "sent": "Marked as sent by you", "skipped": "Skipped"}
+CONSENT_TEXT = "I agree to receive CIRCULATE alerts on this WhatsApp number. I can turn them off anytime."
+FRESH_ALERT_HOURS = 24
+
+
+def _safely(fn, *args):
+    """Alerts must never stop the action that caused them."""
+    try:
+        return fn(*args)
+    except Exception as e:  # noqa: BLE001
+        print(f"whatsapp alert not prepared ({fn.__name__}): {e}")
+
+
+def _norm_biz(name: str | None) -> str:
+    return (name or "").split(",")[0].strip().lower()
+
+
+def _sample_businesses() -> list[dict]:
+    out, seen = [], set()
+    for key in SC.SCENARIOS:
+        d = SC.dataset(key)
+        sellers = [(x.name, "seller") for x in d["sellers"]]
+        buyers = [(x.buyer_name, "food bank" if getattr(x, "buyer_type", "") == "ngo" else "buyer") for x in d["demands"]]
+        for nm, role in sellers + buyers:
+            if nm not in seen:
+                seen.add(nm)
+                out.append({"name": nm, "role": role})
+    out.append({"name": OWN_NAME, "role": "seller"})
+    return out
+
+
+def _contact_out(r) -> dict:
+    return {"id": r["id"], "business": r["business"], "role": r["role"], "name": r["name"],
+            "phone": MSG.mask_phone(r["phone"]), "alerts": json.loads(r["alerts"]), "active": bool(r["active"]),
+            "consent_at": r["consent_at"], "created_at": r["created_at"]}
+
+
+def notify(event: str, text: str, roles: list[str], businesses: list[str] | None = None,
+           deal_id: int | None = None, item_id: str | None = None) -> int:
+    """Prepare one ready message per matching contact: active, consented, alert type ticked, and (if given) the right business.
+    The same event for the same deal or item is prepared only once per contact."""
+    wanted = None if businesses is None else {_norm_biz(b) for b in businesses}
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    n = 0
+    with closing(db()) as con, con:
+        for c in con.execute("SELECT * FROM whatsapp_contacts WHERE active=1 AND consent_at IS NOT NULL").fetchall():
+            if c["role"] not in roles or event not in json.loads(c["alerts"]):
+                continue
+            if wanted is not None and _norm_biz(c["business"]) not in wanted:
+                continue
+            cur = con.execute("INSERT OR IGNORE INTO notifications (created_at, event, deal_id, item_id, contact_id, text, link, status)"
+                              " VALUES (?,?,?,?,?,?,?,?)", (now, event, deal_id, item_id, c["id"], text, MSG.wa_link(text, c["phone"]), "ready"))
+            n += cur.rowcount
+    return n
+
+
+def _passport_path(key: str, rid: str) -> str:
+    if rid.startswith(f"{OWN_ID}-"):
+        lane = "fresh" if SC.SCENARIOS[key]["engine"] == "perishable" else "durable"
+        return f"/passport/import_{lane}/{rid[len(OWN_ID) + 1:]}"
+    return f"/passport/{key}/{rid}"
+
+
+def _notify_requirement_fit(demand, key: str, standing: bool, origin: str):
+    """A posted requirement that fits: the sellers whose stock the engine would use, and the workshop whose next sheet it fits."""
+    order = demand.model_dump(mode="json")
+    d = _dataset_with_own(key)
+    f = fulfil(demand, d["sellers"], d["resources"], d["transport"], d["settings"], 0.5, True)
+    b = f.get("best")
+    if b and b["units"] > 0:
+        for ps in b["per_seller"]:
+            rid = next((a["resource_id"] for a in b["allocations"] if a["seller_id"] == ps["seller_id"]), None)
+            link = origin + (_passport_path(key, rid) if rid else "/")
+            text = MSG.new_match(order, {"kind": "stock", "units": ps["units"], "unit_name": f["unit_name"],
+                                         "value": ps["gain_above_salvage"], "link": link, "label": demand.label}, {"name": ps["seller_name"]})
+            notify("new_match", text, ["seller"], [ps["seller_name"]], item_id=demand.id)
+    if standing and demand.kind == "flat":
+        g = gapfill_demo()
+        req = GapFillRequest(**g)
+        _notify_gapfill(plan_gap_fill(req), {o.id: o for o in req.orders}, origin, OWN_NAME)
+
+
+def _notify_gapfill(plan: dict, orders: dict, origin: str, seller: str = OWN_NAME):
+    """Standing orders posted by buyers that fit this sheet before cutting."""
+    for nb in plan.get("neighbours", []):
+        o = orders.get(nb["order_id"])
+        if o is None or not (o.id.startswith("R") and o.id[1:].isdigit()):
+            continue  # only buyers' posted requirements; the sample standing orders have no contact
+        text = MSG.new_match(o.model_dump(mode="json"), {"kind": "gapfill", "units": nb["units"], "unit_name": "parts", "value": nb["value"],
+                                                          "link": origin + "/#seller/gapfill/durable", "label": o.label}, {"name": seller})
+        notify("new_match", text, ["seller"], [seller], item_id=o.id)
+
+
+def _deal_context(row):
+    key = row["scenario"] if row["scenario"] in SC.SCENARIOS else next(
+        (k for k in SC.SCENARIOS if any(x.id == row["demand_id"] for x in _dataset_with_own(k)["demands"])), "steel")
+    d = _dataset_with_own(key)
+    demand = next((x for x in d["demands"] if x.id == row["demand_id"]), None)
+    return demand, {x.id: x.name for x in d["sellers"]}
+
+
+def _notify_deal(event: str, deal_id: int, origin: str, lg: dict | None = None):
+    row = _deal_row(deal_id)
+    demand, names = _deal_context(row)
+    base = {"id": row["id"], "buyer_name": row["buyer_name"], "sellers": [names.get(x, x) for x in json.loads(row["sellers"])],
+            "units": row["units"], "unit_name": row["unit_name"], "is_simulated": bool(row["is_simulated"]), "label": "sample",
+            "part_name": None if row["kind"] == "perishable" or demand is None else demand.part_name}
+    buyers = ["buyer", "food bank"]
+    if event == "order_accepted":
+        text = MSG.order_accepted({**base, "link": f"{origin}/deals/{deal_id}/pickup-sheet"})
+        notify(event, text, buyers, [row["buyer_name"]], deal_id=deal_id)
+    elif event == "pickup_booked":
+        bk = json.loads(row["booking"])
+        when = datetime.fromisoformat(bk["date"]).strftime("%d %b %Y").lstrip("0")
+        sellers = [c["seller_name"] for c in lg["collect"]] if lg else base["sellers"]
+        text = MSG.pickup_booked({**base, "sellers": sellers, "date": when, "slot": bk["slot"],
+                                  "vehicle": (lg or {}).get("vehicle", {}).get("name"), "link": f"{origin}/deals/{deal_id}/pickup-sheet"})
+        slot = f"{bk['date']} {bk['slot']}"  # a new slot is a new alert; the same slot is never prepared twice
+        notify(event, text, ["seller"], sellers, deal_id=deal_id, item_id=slot)
+        notify(event, text, buyers, [row["buyer_name"]], deal_id=deal_id, item_id=slot)
+    elif event == "delivered":
+        text = MSG.delivered({**base, "evidence": json.loads(row["evidence"]), "link": f"{origin}/deals/{deal_id}/challan"})
+        notify(event, text, buyers, [row["buyer_name"]], deal_id=deal_id)
+
+
+def _fresh_lots():
+    d = SC.dataset("food")
+    names = {x.id: x.name for x in d["sellers"]}
+    out = [("food", r, names[r.seller_id]) for r in d["resources"]]
+    return out + [("import_fresh", r, r.seller_id) for r in _own_items("fresh")]
+
+
+def _sweep_fresh(origin: str, now: datetime | None = None) -> int:
+    """Food bank and buyer contacts with fresh alerts hear about every lot at 24 hours or less, once per lot."""
+    now, n = now or datetime.now(), 0
+    for key, lot, seller_name in _fresh_lots():
+        if lot.category == "used_cooking_oil" or lot.hours_left > FRESH_ALERT_HOURS:
+            continue
+        by = now + timedelta(hours=lot.hours_left)
+        text = MSG.fresh_expiring({"seller_name": seller_name, "product": lot.product, "quantity_kg": lot.quantity_kg,
+                                   "storage": lot.storage, "hours_left": lot.hours_left,
+                                   "pickup_by": by.strftime("%H:%M on %d %b").replace(" 0", " "),
+                                   "link": f"{origin}/passport/{key}/{lot.id}", "label": lot.label})
+        n += notify("fresh", text, ["food bank", "buyer"], None, item_id=f"{key}:{lot.id}")
+    return n
+
+
+class ContactIn(BaseModel):
+    business: str = ""
+    role: str = ""
+    name: str = ""
+    phone: str = ""
+    alerts: list[str] = []
+    consent: bool = False
+
+
+class ContactPatch(BaseModel):
+    business: str | None = None
+    role: str | None = None
+    name: str | None = None
+    phone: str | None = None
+    alerts: list[str] | None = None
+    active: bool | None = None
+
+
+def _check_contact(c: dict, need_consent: bool) -> tuple[dict, dict]:
+    errors, out = {}, {}
+    if "business" in c:
+        out["business"] = (c["business"] or "").strip()
+        if not out["business"]:
+            errors["business"] = "Choose your business, or type its name."
+    if "role" in c:
+        out["role"] = c["role"]
+        if c["role"] not in CONTACT_ROLES:
+            errors["role"] = "Choose seller, buyer or food bank."
+    if "name" in c:
+        out["name"] = (c["name"] or "").strip()
+        if not out["name"]:
+            errors["name"] = "Enter the name of the person who will read the alerts."
+    if "phone" in c:
+        try:
+            out["phone"] = MSG.normalize_phone(c["phone"])
+        except ValueError:
+            errors["phone"] = "Enter a 10-digit mobile number, or the full number with its country code."
+    if "alerts" in c:
+        out["alerts"] = [a for a in ALERT_TYPES if a in (c["alerts"] or [])]
+        if not out["alerts"] or len(out["alerts"]) != len(set(c["alerts"] or [])):
+            errors["alerts"] = "Choose at least one alert." if not out["alerts"] else "Choose from the listed alerts."
+    if need_consent and not c.get("consent"):
+        errors["consent"] = "Tick the box to agree to receive alerts on this number."
+    return out, errors
+
+
+@app.get("/api/whatsapp/contacts")
+def whatsapp_contacts(role: str | None = None):
+    """Registered contacts with the phone masked. role filters the list (seller, buyer, food bank)."""
+    with closing(db()) as con:
+        rows = con.execute("SELECT * FROM whatsapp_contacts ORDER BY id DESC").fetchall()
+    roles = None if not role else set(role.split(","))
+    return {"contacts": [_contact_out(r) for r in rows if roles is None or r["role"] in roles],
+            "businesses": _sample_businesses(), "alert_types": ALERT_TYPES, "roles": list(CONTACT_ROLES),
+            "default_alerts": DEFAULT_ALERTS, "consent_text": CONSENT_TEXT}
+
+
+@app.post("/api/whatsapp/contacts")
+def add_whatsapp_contact(c: ContactIn, request: Request):
+    vals, errors = _check_contact(c.model_dump(), need_consent=True)
+    if not errors:
+        with closing(db()) as con:
+            dup = con.execute("SELECT id FROM whatsapp_contacts WHERE phone=? AND business=?", (vals["phone"], vals["business"])).fetchone()
+        if dup:
+            errors["phone"] = "This number is already registered for this business. Edit it in the list instead."
+    if errors:
+        raise HTTPException(422, {"message": "Some fields need fixing. Nothing was saved.", "errors": errors})
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with closing(db()) as con, con:
+        cur = con.execute("INSERT INTO whatsapp_contacts (business, role, name, phone, alerts, consent_at, active, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                          (vals["business"], vals["role"], vals["name"], vals["phone"], json.dumps(vals["alerts"]), now, 1, now))
+        row = con.execute("SELECT * FROM whatsapp_contacts WHERE id=?", (cur.lastrowid,)).fetchone()
+    _safely(_sweep_fresh, _origin(request))
+    return _contact_out(row)
+
+
+@app.patch("/api/whatsapp/contacts/{cid}")
+def edit_whatsapp_contact(cid: int, c: ContactPatch):
+    given = {k: v for k, v in c.model_dump().items() if v is not None}
+    vals, errors = _check_contact({k: v for k, v in given.items() if k != "active"}, need_consent=False)
+    if errors:
+        raise HTTPException(422, {"message": "Some fields need fixing. Nothing was changed.", "errors": errors})
+    if "active" in given:
+        vals["active"] = int(given["active"])
+    if "alerts" in vals:
+        vals["alerts"] = json.dumps(vals["alerts"])
+    with closing(db()) as con, con:
+        if con.execute("SELECT id FROM whatsapp_contacts WHERE id=?", (cid,)).fetchone() is None:
+            raise HTTPException(404, "no such contact")
+        if vals:
+            con.execute(f"UPDATE whatsapp_contacts SET {', '.join(k + '=?' for k in vals)} WHERE id=?", (*vals.values(), cid))
+        row = con.execute("SELECT * FROM whatsapp_contacts WHERE id=?", (cid,)).fetchone()
+    return _contact_out(row)
+
+
+@app.delete("/api/whatsapp/contacts/{cid}")
+def remove_whatsapp_contact(cid: int):
+    with closing(db()) as con, con:
+        n = con.execute("DELETE FROM whatsapp_contacts WHERE id=?", (cid,)).rowcount
+        con.execute("DELETE FROM notifications WHERE contact_id=? AND status='ready'", (cid,))
+    if not n:
+        raise HTTPException(404, "no such contact")
+    return {"removed": True}
+
+
+class NotifStatus(BaseModel):
+    status: Literal["opened", "sent", "skipped"]  # never "delivered" or "read": we only record what a person did
+
+
+@app.get("/api/whatsapp/notifications")
+def whatsapp_notifications(request: Request, status: str | None = None):
+    _safely(_sweep_fresh, _origin(request))
+    with closing(db()) as con:
+        rows = con.execute("SELECT n.*, c.name AS c_name, c.business AS c_business, c.phone AS c_phone, c.role AS c_role "
+                           "FROM notifications n LEFT JOIN whatsapp_contacts c ON c.id = n.contact_id ORDER BY n.id DESC").fetchall()
+    out = []
+    for r in rows:
+        if status and r["status"] != status:
+            continue
+        out.append({"id": r["id"], "created_at": r["created_at"], "event": r["event"], "event_text": ALERT_TYPES.get(r["event"], r["event"]),
+                    "deal_id": r["deal_id"], "item_id": r["item_id"], "text": r["text"], "link": r["link"], "status": r["status"],
+                    "status_text": STATUS_TEXT[r["status"]], "opened_at": r["opened_at"], "sent_at": r["sent_at"],
+                    "to": {"name": r["c_name"] or "Removed contact", "business": r["c_business"] or "", "role": r["c_role"] or "",
+                           "phone": MSG.mask_phone(r["c_phone"]) if r["c_phone"] else ""}})
+    return {"notifications": out, "ready": sum(1 for x in out if x["status"] == "ready")}
+
+
+@app.get("/api/whatsapp/notifications/count")
+def whatsapp_ready_count(request: Request):
+    _safely(_sweep_fresh, _origin(request))
+    with closing(db()) as con:
+        return {"ready": con.execute("SELECT COUNT(*) FROM notifications WHERE status='ready'").fetchone()[0]}
+
+
+@app.post("/api/whatsapp/notifications/{nid}/status")
+def whatsapp_notification_status(nid: int, s: NotifStatus):
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    col = {"opened": "opened_at", "sent": "sent_at"}.get(s.status)
+    with closing(db()) as con, con:
+        if con.execute("SELECT id FROM notifications WHERE id=?", (nid,)).fetchone() is None:
+            raise HTTPException(404, "no such alert")
+        con.execute(f"UPDATE notifications SET status=?{', ' + col + '=?' if col else ''} WHERE id=?",
+                    (s.status, now, nid) if col else (s.status, nid))
+    return {"id": nid, "status": s.status, "status_text": STATUS_TEXT[s.status]}
+
+
+@app.get("/share/{key}/{rid}")
+def share_on_whatsapp(key: str, rid: str, request: Request):
+    """Open WhatsApp with one stock item's details typed in; the person chooses the chat and presses send."""
+    item = next((i for i in _stock(key) if i["id"] == rid), None)
+    if item is None:
+        raise HTTPException(404, "no such item")
+    text = MSG.offcut_share(item, f"{_origin(request)}/passport/{key}/{rid}")
+    return RedirectResponse(MSG.wa_link(text), status_code=307)
+
+
+@app.get("/register", response_class=HTMLResponse)
+def register_page():
+    """A phone-friendly form to register a WhatsApp number for alerts (for a visitor scanning the QR code)."""
+    e = _html.escape
+    biz = "".join(f'<option value="{e(b["name"])}" data-role="{e(b["role"])}">{e(b["name"])}</option>' for b in _sample_businesses())
+    alerts = "".join(f'<label class="ck"><input type="checkbox" name="alerts" value="{k}"> {e(v)}</label>' for k, v in ALERT_TYPES.items())
+    body = f"""<div class="card"><h1>WhatsApp alerts</h1>
+<p class="note">Register a WhatsApp number to get CIRCULATE alerts. Each alert is prepared in the app and sent by a person with one click; nothing is sent automatically. <span class="chip">Sample data</span></p>
+<form id="f" novalidate>
+<label>Business<select name="business_pick" id="bp">{biz}<option value="__other">Other</option></select></label>
+<label id="otherl" hidden>Business name<input name="business_other" autocomplete="organization"></label><span class="err" id="e-business"></span>
+<label>You are a<select name="role" id="role"><option value="seller">Seller</option><option value="buyer">Buyer</option><option value="food bank">Food bank</option></select></label>
+<label>Your name<input name="name" autocomplete="name"></label><span class="err" id="e-name"></span>
+<label>WhatsApp number<input name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="98765 43210"></label><span class="err" id="e-phone"></span>
+<fieldset><legend>Alerts you want</legend>{alerts}</fieldset><span class="err" id="e-alerts"></span>
+<label class="ck"><input type="checkbox" name="consent"> {e(CONSENT_TEXT)}</label><span class="err" id="e-consent"></span>
+<button type="submit">Register this number</button></form><p id="msg" class="note" aria-live="polite"></p></div>
+<script>
+const f=document.getElementById("f"),bp=document.getElementById("bp"),role=document.getElementById("role"),D={json.dumps(DEFAULT_ALERTS)};
+const tick=()=>f.querySelectorAll("[name=alerts]").forEach(c=>c.checked=(D[role.value]||[]).includes(c.value));
+bp.onchange=()=>{{document.getElementById("otherl").hidden=bp.value!=="__other";const o=bp.selectedOptions[0];if(o.dataset.role){{role.value=o.dataset.role;tick();}}}};
+role.onchange=tick;bp.onchange();
+f.onsubmit=async ev=>{{ev.preventDefault();document.querySelectorAll(".err").forEach(x=>x.textContent="");
+ const fd=new FormData(f),body={{business:bp.value==="__other"?fd.get("business_other"):bp.value,role:role.value,name:fd.get("name"),phone:fd.get("phone"),alerts:fd.getAll("alerts"),consent:fd.get("consent")==="on"}};
+ const r=await fetch("/api/whatsapp/contacts",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify(body)}});const t=await r.json().catch(()=>({{}}));
+ if(r.ok){{f.hidden=true;document.getElementById("msg").textContent="Registered: "+t.phone+" for "+t.business+". Alerts will appear on the laptop under Ready to send. You can turn them off anytime.";}}
+ else{{const er=(t.detail&&t.detail.errors)||{{}};for(const k in er){{const x=document.getElementById("e-"+k);if(x)x.textContent=er[k];}}document.getElementById("msg").textContent=(t.detail&&t.detail.message)||"Something went wrong. Try again.";}}}};
+</script>"""
+    css = ("label{display:flex;flex-direction:column;gap:4px;font-size:14px;margin:10px 0 2px;color:#5d6b77}"
+           "input:not([type=checkbox]),select{font:inherit;font-size:16px;padding:10px 12px;border:1px solid #c4ccd3;border-radius:8px;background:#fff;color:#17222b}"
+           "label.ck{flex-direction:row;align-items:flex-start;gap:10px;color:#17222b;font-size:15px}label.ck input{width:20px;height:20px;margin-top:1px;flex:none}"
+           "fieldset{border:1px solid #d9dfe4;border-radius:8px;margin:12px 0 2px;padding:6px 12px 10px}legend{font-size:14px;color:#5d6b77;padding:0 4px}"
+           "button{margin-top:14px;width:100%;padding:12px;font-size:16px;background:#f2a33a;border-color:#f2a33a;color:#1f1400}"
+           ".err{color:#b0281c;font-size:13px;display:block}.err:empty{display:none}")
+    return _PAGE.format(title="WhatsApp alerts", body=body).replace("</style>", css + "</style>")
