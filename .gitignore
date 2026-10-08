@@ -3,3 +3,4 @@ __pycache__/
 circulate.db
 .pytest_cache/
 uploads/
+erp_drop/

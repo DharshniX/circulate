@@ -171,6 +171,40 @@ img.ex{max-width:100%;height:auto;border-radius:var(--r-ctl);border:1px solid va
 .tracker li.done{border-top-color:var(--ok);color:var(--fg)}.tracker li.cur{border-top-color:var(--acc);font-weight:600}
 input[type=date]{font-family:var(--mono)}
 
+/* ---------- connectors ---------- */
+.conns{display:flex;flex-direction:column;gap:var(--s1)}
+.conngrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:var(--s2)}
+.conn{all:unset;box-sizing:border-box;display:flex;flex-direction:column;gap:4px;padding:12px var(--s2);background:var(--panel);border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);cursor:pointer;transition:border-color var(--ease)}
+.conn:hover{border-color:var(--mut)}.conn:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+.conn.planned{cursor:default;background:transparent;border-style:dashed;box-shadow:none}.conn.planned:hover{border-color:var(--line)}
+.conn b{font:600 1rem var(--disp);letter-spacing:.02em}
+.fspath{flex:1 1 100%}.fspath input{width:100%;max-width:720px;font-family:var(--mono);font-size:13px}
+details summary{cursor:pointer}
+
+/* ---------- manual entry (built for phones) ---------- */
+.manual form{display:flex;flex-direction:column;gap:var(--s2)}
+.mgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:var(--s2)}
+.mfield.wide{grid-column:1/-1}
+.mfield input:not([type=radio]),.mfield select{width:100%;height:auto;min-height:44px;font-size:16px}
+.mfield input[aria-invalid="true"],.mfield select[aria-invalid="true"]{border-color:var(--bad);box-shadow:0 0 0 1px var(--bad)}
+.ferr{color:var(--bad);font-size:12.5px;line-height:1.4}.ferr:empty{display:none}
+.opts{display:flex;gap:var(--s1)}
+.opts label{flex:1;position:relative;min-height:44px;display:flex;align-items:center;justify-content:center;padding:0 12px;border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--panel);color:var(--fg);font-size:15px;cursor:pointer;transition:background-color var(--ease),border-color var(--ease)}
+.opts label:hover{border-color:var(--mut)}
+.opts label{white-space:nowrap}
+@media(min-width:700px){.mfield:has(.opts){grid-column:span 2}}
+.opts input[type=radio]{position:absolute;opacity:0;width:1px;height:1px;padding:0}
+.opts label:has(input:checked){background:var(--np);border-color:var(--np);color:#fff}
+.opts label:has(input:focus-visible){outline:2px solid var(--ring);outline-offset:2px}
+.mphoto{display:flex;flex-wrap:wrap;gap:var(--s1) var(--s2);align-items:center}
+.bigbtn{min-height:48px;font-size:15px;padding:12px var(--s3)}
+.bigbtn:focus-within{outline:2px solid var(--ring);outline-offset:2px}
+.vh{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+.mthumb{width:96px;height:72px;object-fit:cover;border-radius:var(--r-ctl);border:1px solid var(--line)}
+.mres{padding:12px var(--s2);border-radius:var(--r-ctl);display:flex;flex-direction:column;gap:var(--s1)}
+.mres.ok{background:var(--okbg);color:var(--ok)}.mres.warn{background:var(--warnbg);color:var(--warn)}
+.mres p{color:var(--fg)}
+
 /* ---------- motion ---------- */
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}.btn:active{transform:none}}
 
@@ -199,6 +233,7 @@ input[type=date]{font-family:var(--mono)}
   td.w{min-width:180px}
   .lgrid{gap:var(--s2)}
   .lsearch,.lsearch input{width:100%}
+  .mphoto .bigbtn,#manSubmit{width:100%}
   .card>.ctrl>.lbl:first-child{min-width:0;flex-basis:100%;line-height:16px}
 }
 @media print{.rail,.topbar,.noprint{display:none!important}.app{display:block}main{padding:0;max-width:none}.card,.tile{border:none;padding:0;box-shadow:none}body{background:#fff;color:#000}.printonly{display:block}}

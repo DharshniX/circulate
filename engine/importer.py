@@ -135,3 +135,45 @@ def run_import(lane: Lane, text: str, days_unused_limit: int = 30, hours_left_li
     return {"lane": lane, "source": SOURCE, "rows_read": len(rows), "accepted": len(surplus) + len(kept),
             "rejected": rejected, "surplus": surplus, "kept": kept,
             "thresholds": {"days_unused_limit": days_unused_limit, "hours_left_limit": hours_left_limit}}
+
+
+MANUAL_SOURCE = "Entered by hand by the seller"
+
+
+def _field_errors(e: ValidationError) -> dict[str, str]:
+    """Plain-language errors keyed by form field (item_id, length_mm ...)."""
+    out: dict[str, str] = {}
+    for x in e.errors():
+        field = str(x["loc"][0]) if x["loc"] else "item"
+        field = "item_id" if field == "id" else field
+        ctx = {k: (f"{v:g}" if isinstance(v, (int, float)) else v) for k, v in (x.get("ctx") or {}).items()}
+        plain = {"missing": "This is needed.", "string_too_short": "This is needed.", "bool_parsing": "Choose full sheet or offcut.",
+                 "float_parsing": "Enter a number.", "int_parsing": "Enter a whole number.", "int_from_float": "Enter a whole number.",
+                 "literal_error": "Choose one of the options.", "greater_than": f"Must be more than {ctx.get('gt')}.",
+                 "greater_than_equal": f"Must be {ctx.get('ge')} or more.", "less_than_equal": f"Must be {ctx.get('le')} or less."}
+        msg = plain.get(x["type"], x["msg"].removeprefix("Value error, "))
+        msg = msg[0].upper() + msg[1:] if msg else msg
+        out.setdefault(field, msg if msg.endswith(".") else msg + ".")
+    return out
+
+
+def check_one(lane: Lane, values: dict, days_unused_limit: int = 30, hours_left_limit: float = 24,
+              label: DataLabel = "sample") -> dict:
+    """One item typed by hand: exactly the checks and surplus rules a CSV row gets, with errors per field."""
+    raw = {k: ("true" if v is True else "false" if v is False else "" if v is None else str(v)) for k, v in values.items()}
+    errors: dict[str, str] = {}
+    if lane == "durable" and _norm("material", raw.get("material") or ""):
+        try:
+            M.get(_norm("material", raw["material"]))
+        except ValueError as e:  # unknown material: still check every other field, so the form shows all errors at once
+            errors["material"] = str(e)[0].upper() + str(e)[1:] + "."
+            raw["material"] = "mild_steel"
+    try:
+        item = _build(lane, raw, label)
+    except ValidationError as e:
+        return {"ok": False, "errors": {**_field_errors(e), **errors}}
+    if errors:
+        return {"ok": False, "errors": errors}
+    rules, kept_reason = detect(lane, item, days_unused_limit, hours_left_limit)
+    return {"ok": True, "item": item.model_dump(mode="json"), "surplus": bool(rules), "rules": rules,
+            "kept_reason": kept_reason, "urgent": lane == "fresh" and bool(rules)}

@@ -14,7 +14,10 @@ import io
 import json
 import re
 import sqlite3
-from contextlib import closing
+import asyncio
+import os
+import threading
+from contextlib import asynccontextmanager, closing
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -28,6 +31,7 @@ from engine import scenarios as SC
 from engine.engines import REGISTRY
 from engine.gapfill import GapFillRequest, plan_gap_fill
 from engine.impact import DealImpactInput, EmissionFactor, compute
+from engine import connectors as CN
 from engine import importer as IMP
 from engine.models import Demand, PlanRequest, Resource, Seller, Settings, Transport
 from engine.pooling import _dist, fulfil
@@ -36,7 +40,18 @@ from engine.routes import seller_plan, seller_routes
 
 ROOT = Path(__file__).resolve().parent
 DB = ROOT.parent / "circulate.db"
-app = FastAPI(title="CIRCULATE", version="0.2")
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    """Start the auto-sync folder checker with the server (set CIRCULATE_AUTOSYNC=0 to switch it off)."""
+    task = asyncio.create_task(_autosync_loop()) if os.environ.get("CIRCULATE_AUTOSYNC", "1") != "0" else None
+    yield
+    if task:
+        task.cancel()
+
+
+app = FastAPI(title="CIRCULATE", version="0.2", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
@@ -52,8 +67,17 @@ def db():
     for col, typ in (("scenario", "TEXT"), ("rate_multiplier", "REAL"), ("booking", "TEXT")):
         if col not in have:  # older databases: add the column, keep every row
             con.execute(f"ALTER TABLE deals ADD COLUMN {col} {typ}")
+    con.execute("""CREATE TABLE IF NOT EXISTS sync_folders (
+        lane TEXT PRIMARY KEY, path TEXT, enabled INTEGER, measured INTEGER, days_unused_limit INTEGER, hours_left_limit REAL)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS sync_seen (
+        lane TEXT, file TEXT, fingerprint TEXT, imported_at TEXT, PRIMARY KEY (lane, file))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS sync_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, lane TEXT, folder TEXT, file TEXT, status TEXT, rows_read INTEGER,
+        surplus INTEGER, rejected INTEGER, listed INTEGER, label TEXT, message TEXT, details TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS imported_stock (
         lane TEXT, item_id TEXT, item TEXT, rules TEXT, label TEXT, listed_at TEXT, PRIMARY KEY (lane, item_id))""")
+    if "source" not in {r[1] for r in con.execute("PRAGMA table_info(imported_stock)")}:
+        con.execute("ALTER TABLE imported_stock ADD COLUMN source TEXT")  # older rows read as CSV imports
     return con
 
 
@@ -291,7 +315,7 @@ def _imported_stock(key: str) -> list[dict]:
         item = {"id": p.id, "seller_id": p.seller_id, "seller_name": p.seller_id, "kind": p.kind,
                 "description": _describe(p), "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2),
                 "scrap_value": None, "scrap_price_per_kg": None, "label": r["label"], "status": "available",
-                "passport": f"/passport/{key}/{p.id}", "rules": json.loads(r["rules"]), "source": IMP.SOURCE,
+                "passport": f"/passport/{key}/{p.id}", "rules": json.loads(r["rules"]), "source": r["source"] or IMP.SOURCE,
                 "listed_at": r["listed_at"]}
         if p.kind == "perishable":
             item["hours_left"] = p.hours_left
@@ -430,8 +454,9 @@ def data_quality():
     with closing(db()) as con:
         n_sim = con.execute("SELECT COUNT(*) FROM deals WHERE is_simulated=1").fetchone()[0]
         n_real = con.execute("SELECT COUNT(*) FROM deals WHERE is_simulated=0").fetchone()[0]
-        for lane, label, n in con.execute("SELECT lane, label, COUNT(*) FROM imported_stock GROUP BY lane, label"):
-            rows.append({"area": f"Imported stock (CSV), {lane}", "label": label, "count": n})
+        for lane, label, src, n in con.execute("SELECT lane, label, COALESCE(source, ''), COUNT(*) FROM imported_stock GROUP BY lane, label, source"):
+            area = "Entered by hand" if src == IMP.MANUAL_SOURCE else "Imported stock (CSV)"
+            rows.append({"area": f"{area}, {lane}", "label": label, "count": n})
     rows.append({"area": "Deals made in this demo", "label": "simulated", "count": n_sim})
     rows.append({"area": "Deals with real delivery", "label": "verified", "count": n_real})
     return {"rows": rows}
@@ -473,7 +498,8 @@ class CuttingJob(BaseModel):
 
 def _run_import(req: ImportRequest, label="sample"):
     try:
-        return IMP.run_import(req.lane, req.csv_text, req.days_unused_limit, req.hours_left_limit, label)
+        upload = CN.CsvUpload(req.csv_text).stock_csv(req.lane)[0]
+        return IMP.run_import(req.lane, upload.text, req.days_unused_limit, req.hours_left_limit, label)
     except ValueError as e:
         _bad(e)
 
@@ -490,6 +516,16 @@ def import_preview(req: ImportRequest):
     return _run_import(req)
 
 
+def _list_surplus(lane: str, result: dict, label: str, source: str = IMP.SOURCE) -> int:
+    """Put an import's surplus on the marketplace: stock board, passports and QR codes. Same item id = updated."""
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with closing(db()) as con, con:
+        for s in result["surplus"]:
+            con.execute("INSERT OR REPLACE INTO imported_stock (lane, item_id, item, rules, label, listed_at, source) VALUES (?,?,?,?,?,?,?)",
+                        (lane, s["item"]["id"], json.dumps(s["item"]), json.dumps(s["rules"]), label, now, source))
+    return len(result["surplus"])
+
+
 @app.post("/api/import/list")
 def import_list(req: ListRequest):
     """List the surplus items on the marketplace (stock board, passports, QR codes)."""
@@ -497,11 +533,7 @@ def import_list(req: ListRequest):
     r = _run_import(req, label)
     if not r["surplus"]:
         _bad(ValueError("Nothing was found as surplus, so nothing was listed. Lower the thresholds or check the file."))
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    with closing(db()) as con, con:
-        for s in r["surplus"]:
-            con.execute("INSERT OR REPLACE INTO imported_stock (lane, item_id, item, rules, label, listed_at) VALUES (?,?,?,?,?,?)",
-                        (req.lane, s["item"]["id"], json.dumps(s["item"]), json.dumps(s["rules"]), label, now))
+    _list_surplus(req.lane, r, label)
     key = f"import_{req.lane}"
     return {"listed": len(r["surplus"]), "label": label, "stock_key": key, "items": _stock(key)}
 
@@ -570,22 +602,33 @@ async def upload_photo(key: str, rid: str, request: Request):
     """The seller's own photo of this item. The body is the image file itself (JPEG, PNG or WebP)."""
     _item_or_404(key, rid)
     ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
-    if ctype not in PHOTO_TYPES:
-        raise HTTPException(415, "Send a JPEG, PNG or WebP photo.")
     data = await request.body()
+    problem = _photo_problem(ctype, data)
+    if problem:
+        raise HTTPException(*problem)
+    return {"photo": _write_photo(key, rid, ctype, data)}
+
+
+def _photo_problem(ctype: str, data: bytes) -> tuple[int, str] | None:
+    if ctype not in PHOTO_TYPES:
+        return 415, "Send a JPEG, PNG or WebP photo."
     if not data:
-        raise HTTPException(422, "The photo is empty. Choose the file again.")
+        return 422, "The photo is empty. Choose the file again."
     if len(data) > PHOTO_MAX:
-        raise HTTPException(413, "The photo is larger than 5 MB. Resize it and try again.")
+        return 413, "The photo is larger than 5 MB. Resize it and try again."
     if _sniff(data) != ctype:
-        raise HTTPException(422, "The file is not a real JPEG, PNG or WebP image.")
+        return 422, "The file is not a real JPEG, PNG or WebP image."
+    return None
+
+
+def _write_photo(key: str, rid: str, ctype: str, data: bytes) -> str:
     old = _photo_file(key, rid)
     if old:
         old.unlink()
     f = PHOTOS / re.sub(r"[^A-Za-z0-9_]", "_", key) / (rid.encode().hex() + PHOTO_TYPES[ctype])
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_bytes(data)
-    return {"photo": _photo_url(key, rid)}
+    return _photo_url(key, rid)
 
 
 @app.get("/api/photo/{key}/{rid}")
@@ -680,7 +723,7 @@ def _browse_imported(lane: str) -> list[dict]:
         item = {**p.model_dump(mode="json"), "key": key, "label": r["label"], "seller_name": p.seller_id,
                 "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2), "distance_km": None,
                 "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id), "rules": json.loads(r["rules"]),
-                "source": IMP.SOURCE, "order": None,
+                "source": r["source"] or IMP.SOURCE, "order": None,
                 "order_reason": "Imported stock is not in the matching data yet. Open its passport to contact the seller."}
         if p.kind == "perishable":
             item["disposal"] = None
@@ -876,3 +919,230 @@ def delivery_challan(deal_id: int):
             f'<div class="sig"><div>Delivered by (driver)</div><div>Received in good condition by (buyer)</div></div>'
             f'<p class="note">Attach this signed challan as delivery evidence. The deal is marked delivered only with evidence and the buyer\'s confirmation.</p></div>')
     return _doc(f"Challan {deal_id}", body)
+
+
+# ---------------- Connectors: CSV upload, auto-sync folder, and planned ones ----------------
+ERP_DROP = ROOT.parent / "erp_drop"
+SYNC_EVERY_SECONDS = 60
+SYNC_MIN_AGE_SECONDS = 1.0  # a file younger than this may still be being written; it is read on the next check
+WORKS_WITH = "Works with any ERP or billing software that can export a stock file."
+_sync_lock = threading.Lock()
+
+
+class FolderConfig(BaseModel):
+    path: str = Field(min_length=1, max_length=1000)
+    enabled: bool = False
+    measured: bool = False
+    days_unused_limit: int = Field(30, ge=0, le=36500)
+    hours_left_limit: float = Field(24, ge=0, le=24 * 365)
+
+
+def _default_folder(lane: str) -> Path:
+    return ERP_DROP / lane
+
+
+def _folder_config(lane: str) -> dict:
+    with closing(db()) as con:
+        row = con.execute("SELECT * FROM sync_folders WHERE lane=?", (lane,)).fetchone()
+    if row is None:
+        return {"lane": lane, "path": str(_default_folder(lane)), "enabled": False, "measured": False,
+                "days_unused_limit": 30, "hours_left_limit": 24.0, "saved": False}
+    return {"lane": lane, "path": row["path"], "enabled": bool(row["enabled"]), "measured": bool(row["measured"]),
+            "days_unused_limit": row["days_unused_limit"], "hours_left_limit": row["hours_left_limit"], "saved": True}
+
+
+def _log(lane, folder, file, status, rows_read=None, surplus=None, rejected=None, listed=None, label=None, message="", details=None):
+    at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    with closing(db()) as con, con:
+        cur = con.execute("INSERT INTO sync_log (at, lane, folder, file, status, rows_read, surplus, rejected, listed, label, message, details)"
+                          " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (at, lane, folder, file, status, rows_read, surplus, rejected, listed,
+                                                                 label, message, json.dumps(details or [])))
+    return {"id": cur.lastrowid, "at": at, "lane": lane, "folder": folder, "file": file, "status": status, "rows_read": rows_read,
+            "surplus": surplus, "rejected": rejected, "listed": listed, "label": label, "message": message, "details": details or []}
+
+
+def _sync_log(lane: str, limit: int = 20) -> list[dict]:
+    with closing(db()) as con:
+        rows = con.execute("SELECT * FROM sync_log WHERE lane=? ORDER BY id DESC LIMIT ?", (lane, limit)).fetchall()
+    return [{**dict(r), "details": json.loads(r["details"] or "[]")} for r in rows]
+
+
+def _sync_folder(lane: str, background: bool = False) -> list[dict]:
+    """Import every new or changed .csv in the lane's folder. Unchanged files are never imported twice.
+    Files are only read; nothing in the folder is moved, changed or deleted."""
+    cfg = _folder_config(lane)
+    folder = Path(cfg["path"])
+    if folder == _default_folder(lane):
+        folder.mkdir(parents=True, exist_ok=True)  # only ever creates the project's own default folder
+    conn = CN.FolderSync(folder, SYNC_MIN_AGE_SECONDS)
+    label = "measured" if cfg["measured"] else "sample"
+    with _sync_lock:
+        try:
+            exports = conn.stock_csv(lane)
+        except (ValueError, OSError) as e:
+            last = _sync_log(lane, 1)
+            if background and last and last[0]["status"] == "error" and last[0]["message"] == str(e):
+                return []  # the same folder problem is logged once, not every minute
+            return [_log(lane, str(folder), "", "error", message=str(e))]
+        with closing(db()) as con:
+            seen = {r["file"]: r["fingerprint"] for r in con.execute("SELECT file, fingerprint FROM sync_seen WHERE lane=?", (lane,))}
+        entries = []
+        for ex in exports:
+            where = str((folder / ex.name).resolve())
+            if seen.get(where) == ex.fingerprint:
+                continue  # same bytes as last time
+            again = where in seen
+            if ex.error:
+                entry = {"status": "error", "message": ex.error}
+            else:
+                try:
+                    r = IMP.run_import(lane, ex.text, cfg["days_unused_limit"], cfg["hours_left_limit"], label)
+                    entry = {"status": "imported", "rows_read": r["rows_read"], "surplus": len(r["surplus"]),
+                             "rejected": len(r["rejected"]), "listed": _list_surplus(lane, r, label), "label": label,
+                             "message": "Changed file, imported again." if again else "New file.", "details": r["rejected"]}
+                except ValueError as e:
+                    entry = {"status": "error", "message": str(e)}
+            with closing(db()) as con, con:
+                con.execute("INSERT OR REPLACE INTO sync_seen (lane, file, fingerprint, imported_at) VALUES (?,?,?,?)",
+                            (lane, where, ex.fingerprint, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            entries.append(_log(lane, str(folder), ex.name, **entry))
+    return entries
+
+
+def sync_all_enabled() -> dict:
+    """One background pass: every lane whose folder sync is switched on."""
+    return {lane: _sync_folder(lane, background=True) for lane in ("durable", "fresh") if _folder_config(lane)["enabled"]}
+
+
+async def _autosync_loop():
+    for lane in ("durable", "fresh"):
+        _default_folder(lane).mkdir(parents=True, exist_ok=True)
+    while True:
+        try:
+            await asyncio.to_thread(sync_all_enabled)
+        except Exception as e:  # noqa: BLE001  keep checking even if one pass fails
+            print("auto-sync pass failed:", e)
+        await asyncio.sleep(SYNC_EVERY_SECONDS)
+
+
+@app.get("/api/connectors")
+def connectors():
+    folders = {}
+    for lane in ("durable", "fresh"):
+        cfg = _folder_config(lane)
+        last = _sync_log(lane, 1)
+        folders[lane] = {**cfg, "default_path": str(_default_folder(lane)), "last": last[0] if last else None}
+    return {"connectors": [c.info() for c in CN.catalogue()], "works_with": WORKS_WITH, "every_seconds": SYNC_EVERY_SECONDS,
+            "folder": folders}
+
+
+@app.put("/api/connectors/folder/{lane}")
+def save_folder(lane: Literal["durable", "fresh"], cfg: FolderConfig):
+    folder = Path(cfg.path.strip().strip('"')).expanduser()
+    if not folder.is_absolute():
+        folder = ROOT.parent / folder
+    if folder == _default_folder(lane):
+        folder.mkdir(parents=True, exist_ok=True)
+    problem = CN.FolderSync(folder).check()
+    if problem:
+        _bad(ValueError(problem))
+    with closing(db()) as con, con:
+        con.execute("INSERT OR REPLACE INTO sync_folders (lane, path, enabled, measured, days_unused_limit, hours_left_limit) VALUES (?,?,?,?,?,?)",
+                    (lane, str(folder), int(cfg.enabled), int(cfg.measured), cfg.days_unused_limit, cfg.hours_left_limit))
+    return _folder_config(lane)
+
+
+@app.post("/api/connectors/folder/{lane}/sync")
+def sync_now(lane: Literal["durable", "fresh"]):
+    """Check the folder at once (the same check the background task runs every 60 seconds)."""
+    return {"entries": _sync_folder(lane), "log": _sync_log(lane)}
+
+
+@app.get("/api/connectors/folder/{lane}/log")
+def sync_log(lane: Literal["durable", "fresh"], limit: int = 20):
+    return {"log": _sync_log(lane, max(1, min(limit, 200)))}
+
+
+@app.post("/api/connectors/{key}/sync")
+def sync_connector(key: str, lane: Literal["durable", "fresh"] = "durable"):
+    c = next((x for x in CN.catalogue() if x.key == key), None)
+    if c is None:
+        raise HTTPException(404, f"unknown connector {key}")
+    if key == "folder_sync":
+        return sync_now(lane)
+    if key == "csv_upload":
+        raise HTTPException(400, "CSV upload has no sync: upload a file with the form instead.")
+    raise HTTPException(501, f"{c.name} is planned and not built yet. Use CSV upload or Auto-sync folder.")
+
+
+# ---------------- Manual entry: one item typed by hand, same checks as the CSV importer ----------------
+class ManualItem(BaseModel):
+    fields: dict[str, str | float | int | bool | None]
+    use_by: datetime | None = Field(None, description="Fresh: a use-by date and time instead of hours left")
+    days_unused_limit: int = Field(30, ge=0, le=36500)
+    hours_left_limit: float = Field(24, ge=0, le=24 * 365)
+    measured: bool = False
+    list_anyway: bool = False
+    photo: str | None = Field(None, max_length=8_000_000, description="data:image/...;base64,... (optional)")
+
+
+def _manual_id() -> str:
+    return "M-" + datetime.now().strftime("%y%m%d-%H%M%S") + "-" + os.urandom(2).hex().upper()
+
+
+def _decode_photo(url: str) -> tuple[str, bytes] | str:
+    import base64
+    m = re.match(r"^data:([\w/+.-]+);base64,(.*)$", url, re.S)
+    if not m:
+        return "The photo could not be read. Take or choose it again."
+    try:
+        data = base64.b64decode(m.group(2), validate=True)
+    except ValueError:
+        return "The photo could not be read. Take or choose it again."
+    problem = _photo_problem(m.group(1).lower(), data)
+    return problem[1] if problem else (m.group(1).lower(), data)
+
+
+@app.get("/api/manual/options")
+def manual_options():
+    from typing import get_args
+    from engine import materials as MAT
+    from engine.models import Condition, FoodCategory, Storage
+    return {"materials": [{"key": m.key, "name": m.name} for m in MAT.MATERIALS.values()], "conditions": list(get_args(Condition)),
+            "categories": list(get_args(FoodCategory)), "storage": list(get_args(Storage)), "source": IMP.MANUAL_SOURCE}
+
+
+@app.post("/api/manual/{lane}")
+def manual_entry(lane: Literal["durable", "fresh"], m: ManualItem, now: datetime | None = None):
+    """Check one hand-typed item with the importer, apply the surplus rules, and list it if it is surplus
+    (or if the seller asks to list it anyway). An invalid item is never listed. `now` is only for tests."""
+    fields = {k: v for k, v in m.fields.items() if k in IMP.COLUMNS[lane]}
+    fields["item_id"] = str(fields.get("item_id") or "").strip() or _manual_id()
+    fields["seller_id"] = str(fields.get("seller_id") or "").strip() or ("My workshop" if lane == "durable" else "My kitchen")
+    errors = {}
+    if lane == "fresh" and m.use_by is not None:
+        hours = (m.use_by.replace(tzinfo=None) - (now or datetime.now()).replace(tzinfo=None)).total_seconds() / 3600
+        if hours <= 0:
+            errors["use_by"] = "The use-by time has already passed."
+        fields["hours_left"] = round(max(hours, 0), 1)
+    label = "measured" if m.measured else "sample"
+    r = IMP.check_one(lane, fields, m.days_unused_limit, m.hours_left_limit, label)
+    errors.update(r.get("errors", {}))
+    photo = None
+    if m.photo:
+        photo = _decode_photo(m.photo)
+        if isinstance(photo, str):
+            errors["photo"] = photo
+    if errors:
+        raise HTTPException(422, {"message": "Some fields need fixing. Nothing was listed.", "errors": errors})
+    listed = r["surplus"] or m.list_anyway
+    rules = r["rules"] if r["surplus"] else ["Listed by the seller"]
+    out = {"ok": True, "item_id": r["item"]["id"], "item": r["item"], "surplus": r["surplus"], "rules": r["rules"],
+           "kept_reason": r["kept_reason"], "urgent": r["urgent"], "label": label, "listed": listed, "source": IMP.MANUAL_SOURCE}
+    if not listed:
+        return {**out, "message": f"Not surplus: {r['kept_reason']}. It stays as working stock unless you list it anyway."}
+    key = f"import_{lane}"
+    _list_surplus(lane, {"surplus": [{"item": r["item"], "rules": rules}]}, label, IMP.MANUAL_SOURCE)
+    out.update(listed_rules=rules, stock_key=key, passport=f"/passport/{key}/{r['item']['id']}",
+               photo=_write_photo(key, r["item"]["id"], *photo) if photo else None)
+    return out
