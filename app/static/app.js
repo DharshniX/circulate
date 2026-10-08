@@ -1069,7 +1069,7 @@ async function vStock(el) {
     <p class="note">No scrap price is shown for imported items until a dated quote is entered.</p></div>` + h;
   el.innerHTML = h;
   bindScen(el);
-  const ic = $("#impClear", el); if (ic) ic.onclick = async () => { await api(`/api/import/clear?lane=${st.lane}`, {}); render(); };
+  const impClr = $("#impClear", el); if (impClr) impClr.onclick = async () => { await api(`/api/import/clear?lane=${st.lane}`, {}); render(); };
   $("#sf", el).onchange = e => { st.sellerFilter = e.target.value; render(); };
 }
 
