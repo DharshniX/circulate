@@ -44,7 +44,7 @@ def test_durable_price_range_and_distance():
 
 def test_order_is_preselected_or_refused_with_reason():
     dur = items("durable")
-    assert dur["steel:A1"]["order"] == {"scenario": "steel", "index": 0, "demand_id": "S1", "buyer_name": "Workshop W"}
+    assert dur["steel:A1"]["order"] == {"scenario": "steel", "index": 0, "demand_id": "S1", "buyer_name": "Ezhil Engineering Works, Ambattur"}
     assert dur["steel:A13"]["order"] is None and "thickness" in dur["steel:A13"]["order_reason"]
     assert "bent" in dur["steel:B6"]["order_reason"]
     fresh = items("fresh")
@@ -99,13 +99,16 @@ def test_photo_upload_is_checked():
 # ---------------- illustrative photos ----------------
 def test_illustrative_photo_matches_the_kind_of_item_and_is_credited():
     dur, fresh = items("durable"), items("fresh")
-    assert dur["steel:A1"]["illustrative"]["url"] == "/static/illustrative/mild_steel.jpg"
-    assert dur["sheets:Fp1"]["illustrative"]["url"].endswith("plywood.jpg")
-    assert dur["bars:G1"]["illustrative"]["url"].endswith("steel_bars_pipes.jpg")
+    photo = lambda key: (dur.get(key) or fresh.get(key))["illustrative"]["url"]
+    assert photo("steel:A1").startswith("/static/illustrative/mild_steel_")
+    assert photo("sheets:Fp1").startswith("/static/illustrative/plywood_")
+    assert photo("bars:G1").startswith("/static/illustrative/steel_bars_pipes_")
     assert dur["sheets:Ass1"]["illustrative"] is None  # no stainless photo: show none rather than a wrong one
-    assert fresh["food:H1"]["illustrative"]["url"].endswith("tomatoes.jpg")
-    assert fresh["food:C2"]["illustrative"]["url"].endswith("cooked_rice.jpg")  # biryani
+    assert photo("food:H1").startswith("/static/illustrative/tomatoes_")
+    assert photo("food:C2").startswith("/static/illustrative/cooked_rice_")  # biryani
     assert fresh["food:K3"]["illustrative"] is None  # used cooking oil
+    assert photo("steel:A1") == items("durable")["steel:A1"]["illustrative"]["url"]  # the same item always gets the same photo
+    assert len({it["illustrative"]["url"] for it in dur.values() if it.get("material") == "mild_steel" and it["illustrative"]}) >= 2  # variety
     for it in [*dur.values(), *fresh.values()]:
         il = it["illustrative"]
         if il:
@@ -123,9 +126,14 @@ def test_seller_photo_replaces_the_illustrative_one():
 def test_every_illustrative_photo_has_a_reusable_licence():
     import json
     credits = json.loads((main.ROOT / "static" / "illustrative" / "credits.json").read_text(encoding="utf-8"))
-    assert 8 <= len(credits) <= 12
+    from collections import Counter
+    per = Counter(cr["category"] for cr in credits.values())
+    cats = ("mild_steel", "aluminium", "plywood", "steel_bars_pipes", "tomatoes", "onions", "vegetables", "bread", "paneer", "cooked_rice")
+    assert all(2 <= per[c] <= 3 for c in cats) and per["hero_workshop"] == 1 and per["hero_kitchen"] == 1
     for key, cr in credits.items():
-        assert (main.ROOT / "static" / "illustrative" / f"{key}.jpg").exists()
+        f = main.ROOT / "static" / "illustrative" / f"{key}.jpg"
+        assert f.exists() and cr["file"] == f"/static/illustrative/{key}.jpg" and cr["width"] <= 1600
+        assert cr["author"] and cr["source_url"].startswith("https://commons.wikimedia.org/") and cr["shows"]
         assert cr["licence"] in ("CC0", "Public domain") or cr["licence"].startswith(("CC BY 2", "CC BY 3", "CC BY 4", "CC BY-SA"))
         assert "NC" not in cr["licence"] and "ND" not in cr["licence"]
 

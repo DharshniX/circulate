@@ -16,10 +16,10 @@ def _sal(key, price):
 # ---------------- 1. mild steel sheet ----------------
 def steel():
     sal = [_sal("mild_steel", 30.0)]
-    sellers = [Seller(id="A", name="Fabricator A", x_km=2.0, y_km=1.5, salvage=sal),
-               Seller(id="B", name="Machine shop B", x_km=-3.0, y_km=2.0, salvage=sal),
-               Seller(id="C", name="Panel works C", x_km=4.5, y_km=-4.0, salvage=sal),
-               Seller(id="D", name="Fabricator D", x_km=-6.0, y_km=-7.5, salvage=sal)]
+    sellers = [Seller(id="A", name="Sri Ram Fabricators, Ambattur", x_km=2.0, y_km=1.5, salvage=sal),
+               Seller(id="B", name="Kumaran Machine Shop, Guindy", x_km=-3.0, y_km=2.0, salvage=sal),
+               Seller(id="C", name="Vaigai Panel Works, Perungudi", x_km=4.5, y_km=-4.0, salvage=sal),
+               Seller(id="D", name="Pallavan Steel Fabricators, Padi", x_km=-6.0, y_km=-7.5, salvage=sal)]
 
     def p(i, s, L, W, t=2.0, grade="E250", cond="good", full=False, defects=()):
         return FlatPiece(id=f"{s}{i}", seller_id=s, material="mild_steel", length_mm=L, width_mm=W, thickness_mm=t,
@@ -34,13 +34,13 @@ def steel():
            p(1, "C", 1250, 900), p(2, "C", 1000, 600), p(3, "C", 800, 550), p(4, "C", 1250, 400), p(5, "C", 650, 650),
            p(6, "C", 900, 300), p(7, "C", 1200, 700, grade="E350"), p(8, "C", 550, 450),
            p(1, "D", 1250, 1000), p(2, "D", 1100, 800), p(3, "D", 900, 500), p(4, "D", 700, 600), p(5, "D", 1250, 350)]
-    dem = [FlatDemand(id="S1", buyer_id="W", buyer_name="Workshop W", part_name="bracket", material="mild_steel",
+    dem = [FlatDemand(id="S1", buyer_id="W", buyer_name="Ezhil Engineering Works, Ambattur", part_name="bracket", material="mild_steel",
                       length_mm=150, width_mm=100, thickness_mm=2.0, accepted_grades=["E250"], quantity=600,
                       new_price_per_kg=62.0, buyer_utilisation=0.75),
-           FlatDemand(id="S2", buyer_id="Q", buyer_name="Panel maker Q", part_name="base plate", material="mild_steel",
+           FlatDemand(id="S2", buyer_id="Q", buyer_name="Thendral Control Panels, Ekkattuthangal", part_name="base plate", material="mild_steel",
                       length_mm=400, width_mm=300, thickness_mm=2.0, accepted_grades=["E250", "E350"], quantity=40,
                       new_price_per_kg=62.0, buyer_utilisation=0.8, x_km=1.0, y_km=3.0),
-           FlatDemand(id="S3", buyer_id="R", buyer_name="Fabricator R", part_name="gusset", material="mild_steel",
+           FlatDemand(id="S3", buyer_id="R", buyer_name="Selvam Fabrication, Thirumullaivoyal", part_name="gusset", material="mild_steel",
                       length_mm=200, width_mm=200, thickness_mm=2.0, accepted_grades=["E250"], quantity=200,
                       new_price_per_kg=62.0, buyer_utilisation=0.78, x_km=-2.0, y_km=-1.0)]
     return sellers, res, dem
@@ -48,11 +48,11 @@ def steel():
 
 # ---------------- 2. aluminium and plywood sheet (same engine, other profiles) ----------------
 def sheets():
-    sellers = [Seller(id="A", name="Fabricator A", x_km=2.0, y_km=1.5,
+    sellers = [Seller(id="A", name="Sri Ram Fabricators, Ambattur", x_km=2.0, y_km=1.5,
                       salvage=[_sal("aluminium", 150.0), _sal("stainless_304", 110.0)]),
-               Seller(id="S", name="Signage works S", x_km=-2.5, y_km=3.0, salvage=[_sal("aluminium", 150.0), _sal("acrylic", 15.0)]),
-               Seller(id="F", name="Furniture unit F", x_km=3.0, y_km=-3.0, salvage=[_sal("plywood", 4.0)]),
-               Seller(id="I", name="Interiors firm I", x_km=-4.0, y_km=-2.0, salvage=[_sal("plywood", 4.0)])]
+               Seller(id="S", name="Mullai Signage Works, Vadapalani", x_km=-2.5, y_km=3.0, salvage=[_sal("aluminium", 150.0), _sal("acrylic", 15.0)]),
+               Seller(id="F", name="Thekku Furniture Unit, Porur", x_km=3.0, y_km=-3.0, salvage=[_sal("plywood", 4.0)]),
+               Seller(id="I", name="Malligai Interiors, T. Nagar", x_km=-4.0, y_km=-2.0, salvage=[_sal("plywood", 4.0)])]
 
     def al(i, s, L, W, grade="5052", t=1.5, full=False, mat="aluminium"):
         return FlatPiece(id=f"{s}{i}", seller_id=s, material=mat, length_mm=L, width_mm=W, thickness_mm=t,
@@ -66,10 +66,10 @@ def sheets():
            al("al1", "S", 1200, 800), al("al2", "S", 800, 600), al("al3", "S", 650, 400),
            ply("p1", "F", 1800, 600), ply("p2", "F", 1200, 450), ply("p3", "F", 900, 700, grain=False),
            ply("p1", "I", 1500, 500), ply("p2", "I", 1000, 600), ply("p3", "I", 1000, 400, grain=None)]
-    dem = [FlatDemand(id="H1", buyer_id="E", buyer_name="Enclosure maker E", part_name="panel", material="aluminium",
+    dem = [FlatDemand(id="H1", buyer_id="E", buyer_name="Kaveri Enclosures, Guindy", part_name="panel", material="aluminium",
                       length_mm=300, width_mm=200, thickness_mm=1.5, accepted_grades=["5052"], quantity=30,
                       new_price_per_kg=300.0, buyer_utilisation=0.8),
-           FlatDemand(id="H2", buyer_id="K", buyer_name="Kitchen-cabinet maker K", part_name="shelf", material="plywood",
+           FlatDemand(id="H2", buyer_id="K", buyer_name="Neem Tree Kitchen Cabinets, Velachery", part_name="shelf", material="plywood",
                       length_mm=550, width_mm=280, thickness_mm=18.0, accepted_grades=["BWR"], quantity=14,
                       grain_matters=True, new_price_per_kg=95.0, buyer_utilisation=0.8, x_km=0.5, y_km=-1.0)]
     return sellers, res, dem
@@ -78,9 +78,9 @@ def sheets():
 # ---------------- 3. bars and tubes ----------------
 def bars():
     sal = [_sal("mild_steel", 30.0)]
-    sellers = [Seller(id="G", name="Gate fabricator G", x_km=1.5, y_km=2.5, salvage=sal),
-               Seller(id="T", name="Truss workshop T", x_km=-3.5, y_km=1.0, salvage=sal),
-               Seller(id="P", name="Pipe fitter P", x_km=4.0, y_km=-2.5, salvage=sal)]
+    sellers = [Seller(id="G", name="Vetri Gate Works, Avadi", x_km=1.5, y_km=2.5, salvage=sal),
+               Seller(id="T", name="Senthil Truss Works, Red Hills", x_km=-3.5, y_km=1.0, salvage=sal),
+               Seller(id="P", name="Aadhi Pipe Fitters, Royapuram", x_km=4.0, y_km=-2.5, salvage=sal)]
     RB, RBkg = "round bar 16", 1.58  # 0.00617 x d^2 kg/m for round steel bar
     PI, PIkg = "pipe 26.9 x 2.6", 1.56  # sample section weight; check the IS 1239 table
 
@@ -93,10 +93,10 @@ def bars():
            b(5, "T", 2200, prof=PI, kg=PIkg), b(6, "T", 1650, prof="pipe 26.9 x 3.2", kg=1.87),
            b(1, "P", 2900, prof=PI, kg=PIkg), b(2, "P", 2400, prof=PI, kg=PIkg), b(3, "P", 1100, prof=PI, kg=PIkg),
            b(4, "P", 6000, prof=PI, kg=PIkg, full=True)]
-    dem = [LinearDemand(id="B1", buyer_id="R", buyer_name="Railing maker R", part_name="baluster", material="mild_steel",
+    dem = [LinearDemand(id="B1", buyer_id="R", buyer_name="Marina Railings, Mylapore", part_name="baluster", material="mild_steel",
                         profile=RB, mass_per_m_kg=RBkg, cut_length_mm=450, accepted_grades=["E250"], quantity=30,
                         new_price_per_kg=64.0, buyer_utilisation=0.92),
-           LinearDemand(id="B2", buyer_id="F", buyer_name="Furniture workshop F", part_name="chair leg", material="mild_steel",
+           LinearDemand(id="B2", buyer_id="F", buyer_name="Kavin Furniture Workshop, Kolathur", part_name="chair leg", material="mild_steel",
                         profile=PI, mass_per_m_kg=PIkg, cut_length_mm=720, accepted_grades=["E250"], quantity=20,
                         new_price_per_kg=70.0, buyer_utilisation=0.9, x_km=-1.0, y_km=-2.0)]
     return sellers, res, dem
@@ -105,10 +105,10 @@ def bars():
 # ---------------- 4. food-business surplus ----------------
 def food():
     sal = [_sal(c, -2.0) for c in ("vegetables", "fruit", "dairy", "bakery", "packaged", "cooked_meal", "used_cooking_oil")]
-    sellers = [Seller(id="H", name="Hotel kitchen H", x_km=1.0, y_km=1.2, salvage=sal, fssai_licensed=True),
-               Seller(id="K", name="Cloud kitchen K", x_km=-1.8, y_km=0.8, salvage=sal, fssai_licensed=True),
-               Seller(id="R", name="Restaurant R", x_km=2.5, y_km=-1.5, salvage=sal, fssai_licensed=True),
-               Seller(id="C", name="Caterer C", x_km=-2.2, y_km=-2.4, salvage=sal, fssai_licensed=False)]
+    sellers = [Seller(id="H", name="Thamarai Hotel Kitchen, Egmore", x_km=1.0, y_km=1.2, salvage=sal, fssai_licensed=True),
+               Seller(id="K", name="Vazhai Ilai Cloud Kitchen, Velachery", x_km=-1.8, y_km=0.8, salvage=sal, fssai_licensed=True),
+               Seller(id="R", name="Kurinji Restaurant, Mylapore", x_km=2.5, y_km=-1.5, salvage=sal, fssai_licensed=True),
+               Seller(id="C", name="Mangalam Caterers, Tambaram", x_km=-2.2, y_km=-2.4, salvage=sal, fssai_licensed=False)]
 
     def lot(i, s, product, cat, kg, storage, hours):
         return PerishableLot(id=f"{s}{i}", seller_id=s, product=product, category=cat, quantity_kg=kg,
@@ -119,10 +119,10 @@ def food():
            lot(3, "K", "Used cooking oil", "used_cooking_oil", 20, "ambient", 720),
            lot(1, "R", "Carrots and beans", "vegetables", 9, "chilled", 48), lot(2, "R", "Bread loaves", "bakery", 6, "ambient", 14),
            lot(1, "C", "Cabbage", "vegetables", 15, "ambient", 60), lot(2, "C", "Cooked biryani", "cooked_meal", 12, "chilled", 4)]
-    dem = [PerishableDemand(id="F1", buyer_id="M", buyer_name="Hostel mess M", part_name="kg of vegetables",
+    dem = [PerishableDemand(id="F1", buyer_id="M", buyer_name="Anna Nagar Boys' Hostel Mess", part_name="kg of vegetables",
                             buyer_type="food_business", categories=["vegetables"], storage_available=["ambient", "chilled"],
                             quantity=30, min_hours_left_on_arrival=12, normal_price_per_kg=38.0, buyer_fssai_licensed=True),
-           PerishableDemand(id="F2", buyer_id="N", buyer_name="Food bank N", part_name="kg of food",
+           PerishableDemand(id="F2", buyer_id="N", buyer_name="Thozhan Food Bank, Saidapet", part_name="kg of food",
                             buyer_type="ngo", categories=["cooked_meal", "bakery"], storage_available=["ambient", "chilled"],
                             quantity=20, min_hours_left_on_arrival=2, normal_price_per_kg=0.0, x_km=-0.5, y_km=-1.0)]
     return sellers, res, dem
@@ -156,10 +156,10 @@ def gapfill_demo() -> dict:
     return dict(
         sheet=dict(length_mm=2500, width_mm=1250, thickness_mm=6.0, material="mild_steel", grade="E250"),
         job=dict(part_name="base plate", length_mm=450, width_mm=350, quantity=9),
-        orders=[o("G1", "Workshop W", "shim", 75, 75, q=10), o("G2", "Workshop W", "bracket", 150, 100, q=20),
-                o("G3", "Fabricator R", "gusset", 200, 200, q=8), o("G4", "Panel maker Q", "base plate", 300, 300, q=6),
-                o("G5", "Fabricator R", "end plate", 350, 200, q=4), o("G6", "Machine shop B", "stiffener", 400, 100, q=6),
-                o("G7", "Panel maker Q", "cover plate", 400, 300, t=8.0, q=4),
-                o("G8", "Panel works C", "flange blank", 220, 220, q=6, grades=("E350",))],
+        orders=[o("G1", "Ezhil Engineering Works, Ambattur", "shim", 75, 75, q=10), o("G2", "Ezhil Engineering Works, Ambattur", "bracket", 150, 100, q=20),
+                o("G3", "Selvam Fabrication, Thirumullaivoyal", "gusset", 200, 200, q=8), o("G4", "Thendral Control Panels, Ekkattuthangal", "base plate", 300, 300, q=6),
+                o("G5", "Selvam Fabrication, Thirumullaivoyal", "end plate", 350, 200, q=4), o("G6", "Kumaran Machine Shop, Guindy", "stiffener", 400, 100, q=6),
+                o("G7", "Thendral Control Panels, Ekkattuthangal", "cover plate", 400, 300, t=8.0, q=4),
+                o("G8", "Vaigai Panel Works, Perungudi", "flange blank", 220, 220, q=6, grades=("E350",))],
         prices=dict(scrap_price_per_kg=32.0, handling_per_part=2.0, cut_cost_per_m=6.0, pickup=300.0, label="sample"),
         kerf_mm=3.0, edge_margin_mm=5.0, declined_order_ids=[])

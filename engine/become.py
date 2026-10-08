@@ -67,7 +67,8 @@ def reference_candidates(piece, new_price_per_kg: float | None, price_label: str
 
 
 def become(resource, seller: Seller, candidates: list[Candidate], settings: Settings, transport: Transport) -> dict:
-    """Try every candidate on one resource. Options are ranked by value above scrap (or disposal)."""
+    """Try every candidate on one resource. Options with a real buyer come first, then common parts;
+    within each group they are ranked by value above scrap (or disposal)."""
     eng = engine_for(resource.kind)
     kg = eng.resource_kg(resource, settings)
     try:
@@ -126,7 +127,7 @@ def become(resource, seller: Seller, candidates: list[Candidate], settings: Sett
                        normal_price_per_kg=d.normal_price_per_kg, hours_on_arrival=round(resource.hours_left - tour_hours, 1),
                        min_hours_on_arrival=d.min_hours_left_on_arrival)
         options.append(opt)
-    options.sort(key=lambda o: (o["value_above_scrap"] is None, -(o["value_above_scrap"] or 0), o["source"] != "order"))
+    options.sort(key=lambda o: (o["source"] == "reference", o["value_above_scrap"] is None, -(o["value_above_scrap"] or 0)))
     return {"resource_id": resource.id, "kind": resource.kind, "kg": round(kg, 2),
             "scrap": None if offer is None else {"value": round(offer.price_per_kg * kg, 2), "price_per_kg": offer.price_per_kg,
                                                  "label": offer.label, "quoted_on": offer.quoted_on.isoformat() if offer.quoted_on else None},

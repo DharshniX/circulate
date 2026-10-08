@@ -1,11 +1,43 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>CIRCULATE</title>
+<meta name="description" content="An ERP-connected B2B marketplace for industrial and food surplus.">
+<link rel="icon" href="/static/brand/favicon.svg" type="image/svg+xml">
 <link rel="preload" href="/static/fonts/ibm-plex-sans-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/static/fonts/ibm-plex-sans-condensed-600-latin.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="stylesheet" href="/static/app.css"></head>
-<body><div class="app">
-<nav class="rail" aria-label="Sections"><div class="brand">CIRCULATE<small>Surplus exchange</small></div><div id="nav"></div><div class="foot">Real engine, sample data.<br>No field data yet.</div></nav>
-<div style="min-width:0;display:flex;flex-direction:column">
-<div class="topbar"><div><span class="lbl">Lane</span><span class="seg" id="lane"></span></div><div><span class="lbl">Role</span><span class="seg" id="role"></span></div><div class="grow"></div><span class="chip">Sample data · real engine</span></div>
-<main id="main"><div class="spin">Loading…</div></main></div></div>
-<script src="/static/app.js"></script></body></html>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<div class="app">
+  <nav class="rail" aria-label="Sections">
+    <a class="brand" href="#" aria-label="CIRCULATE home">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="2" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+        <rect x="8.5" y="13" width="5" height="6" rx=".5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.6 1.4" opacity=".7"/>
+        <rect x="17" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" opacity=".55"/>
+        <rect x="19.5" y="11" width="6" height="7" rx="1" fill="#f2a33a"/>
+        <path d="M13 21.5h4.2" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round"/>
+        <path d="M15.6 19.9l1.8 1.6-1.8 1.6" fill="none" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span>CIRCULATE<small>Surplus exchange</small></span>
+    </a>
+    <div id="nav"></div>
+    <div class="foot">Real engine, sample data.<br>No field data yet.</div>
+  </nav>
+  <div class="work">
+    <header class="topbar">
+      <div class="switch"><span class="lbl">Lane</span><span class="seg" id="lane"></span></div>
+      <div class="switch"><span class="lbl">Role</span><span class="seg" id="role"></span></div>
+      <div class="grow"></div>
+      <span class="pill p-warn" title="Every business, price and quantity in this demo is made up. The engine is real.">Sample data</span>
+    </header>
+    <main id="main" tabindex="-1"><div class="skel-page" aria-busy="true"><div class="skel h"></div><div class="skel"></div><div class="skel"></div></div></main>
+  </div>
+</div>
+<div class="drawer-wrap" id="drawerWrap" hidden>
+  <div class="drawer-scrim" data-close-drawer></div>
+  <aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawerTitle" tabindex="-1"></aside>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body></html>

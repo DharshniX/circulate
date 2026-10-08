@@ -693,9 +693,13 @@ def _illustrative(item: dict) -> dict | None:
     else:
         name = item["product"].lower()
         key = next((k for w, k in FOOD_WORDS if w in name), None) or FOOD_CATEGORY.get(item["category"])
-    c = credits.get(key) if key else None
-    return None if c is None else {"url": c["file"], "shows": c["shows"], "title": c["title"], "author": c["author"],
-                                   "licence": c["licence"], "licence_url": c["licence_url"], "source_url": c["source_url"]}
+    photos = [c for stem, c in sorted(credits.items()) if (c.get("category") or stem) == key] if key else []
+    if not photos:
+        return None
+    import zlib
+    c = photos[zlib.crc32(f"{item.get('key')}:{item['id']}".encode()) % len(photos)]  # stable: the same item, the same photo
+    return {"url": c["file"], "shows": c["shows"], "title": c["title"], "author": c["author"], "licence": c["licence"],
+            "licence_url": c["licence_url"], "source_url": c["source_url"], "site": c.get("site", "Wikimedia Commons")}
 
 
 def _browse_scenario(key: str) -> tuple[list[dict], str]:
@@ -1308,7 +1312,7 @@ def _become(key: str, rid: str) -> dict:
         merged["options"] += extra["options"]
         merged["refused"] += extra["refused"]
         merged["reference_price_per_kg"] = price
-    merged["options"].sort(key=lambda o: (o["value_above_scrap"] is None, -(o["value_above_scrap"] or 0), o["source"] != "order"))
+    merged["options"].sort(key=lambda o: (o["source"] == "reference", o["value_above_scrap"] is None, -(o["value_above_scrap"] or 0)))
     merged.update(key=key, seller_name=OWN_NAME if own else seller.name, own=own,
                   note="Prices are sample data. Open orders and standing orders are sample orders; common parts have no buyer yet.")
     if res.kind == "flat":

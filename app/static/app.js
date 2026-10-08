@@ -1,10 +1,11 @@
-/* CIRCULATE front end. Plain JavaScript, no build step. Talks to the FastAPI engine. */
+/* CIRCULATE front end. Plain JavaScript, no build step. Talks to the FastAPI engine. Design system: DESIGN.md. */
 "use strict";
 const $ = (s, r = document) => r.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
 const inr = v => v == null ? "–" : (v < 0 ? "−" : "") + "₹" + Math.abs(Math.round(v)).toLocaleString("en-IN");
 const num = (v, d = 0) => v == null ? "–" : Number(v).toLocaleString("en-IN", {maximumFractionDigits: d, minimumFractionDigits: d});
 const pct = v => Math.round(v * 100) + "%";
+const REDUCED = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 async function api(path, body, method, payload) {
   if (method) body = payload;
@@ -18,24 +19,120 @@ async function api(path, body, method, payload) {
   return t;
 }
 
+/* ---------------- shared building blocks (see DESIGN.md) ---------------- */
+const ic = (name, cls = "") => `<svg class="ic ${cls}" aria-hidden="true"><use href="/static/icons/sprite.svg#i-${name}"/></svg>`;
+const term = (plain, technical) => `<span class="term" title="Technical term: ${esc(technical)}">${esc(plain)}</span>`;
+const short = name => String(name || "").split(",")[0];
+const cap1 = s => s ? s[0].toUpperCase() + s.slice(1) : "";
+const words = v => cap1(String(v || "").replace(/_/g, " "));
+const plural = s => /s$/.test(s) ? s : s + "s";
+const isFood = o => !!(o && (o.categories || o.buyer_type));
+const orderName = o => isFood(o) ? `${num(o.quantity, 0)} kg for ${short(o.buyer_name)}` : `${cap1(plural(o.part_name || "part"))} for ${short(o.buyer_name)}`;
+const codeTag = id => id ? `<span class="code" title="Order code">${esc(id)}</span>` : "";
+const BADGES = {
+  sample: ["p-warn", "Sample", "Made-up demo data, not measured at a real business."],
+  simulated: ["p-mut", "Simulated", "Made in this demo or by a simulation. Never counted as a real, verified deal."],
+  modelled: ["p-mut", "Modelled", "Worked out by a model, not observed."],
+  assumption: ["p-warn", "Assumption", "A stated assumption, not an observed value."],
+  measured: ["p-ok", "Measured", "Entered by the seller as taken from their own records."],
+  verified: ["p-ok", "Verified", "A real deal with delivery evidence and the buyer's confirmation."],
+  illustrative: ["p-mut", "Illustrative photo", "A freely licensed photo of the same kind of thing, not the actual item."],
+  planned: ["p-mut", "Planned", "Shown so you know it is coming. It does not work yet."],
+  posted: ["p-np", "Posted by a buyer in this demo", "A requirement a buyer typed into this demo."],
+};
+function badge(kind, text) {
+  const b = BADGES[kind];
+  return b ? `<span class="pill ${b[0]}" title="${esc(b[2])}">${esc(text || b[1])}</span>` : `<span class="pill p-mut">${esc(text || kind)}</span>`;
+}
+const chip = l => badge(l);
+function toast(html, kind = "ok") {
+  const t = document.createElement("div");
+  t.className = `toast ${kind}`;
+  t.innerHTML = `${ic(kind === "ok" ? "circle-check" : "triangle-alert")}<div>${html}</div>`;
+  $("#toasts").appendChild(t);
+  setTimeout(() => t.remove(), 5000);
+}
+const emptyState = (icon, sentence, action = "") => `<div class="empty">${ic(icon, "lg")}<p>${sentence}</p>${action}</div>`;
+const errBox = e => `<div class="err" role="alert">${ic("triangle-alert")}<div><b>That did not work.</b> ${esc(e.message || e)} <span>Check the values you entered and try again; if it keeps failing, reload the page.</span></div></div>`;
+const fold = (title, body, open = false, id = "") => `<details class="fold" ${open ? "open" : ""} ${id ? `id="${id}"` : ""}><summary>${esc(title)} ${ic("chevron-down", "sm chev")}</summary><div class="fold-body">${body}</div></details>`;
+/* The value ladder: scrap value -> transport -> value created. Reused wherever money is shown. */
+function ladder({scrap, transport, gain, scrapLabel = "Scrap value", gainLabel = "Value created"}) {
+  const parts = [Math.max(scrap, 0), Math.max(transport, 0), Math.max(gain, 0)], total = parts.reduce((a, b) => a + b, 0) || 1;
+  const w = v => (v / total * 100).toFixed(2);
+  return `<div class="ladder" role="img" aria-label="${esc(scrapLabel)} ${inr(scrap)}, then transport ${inr(transport)}, then ${esc(gainLabel)} ${inr(gain)}">
+    <div class="rail-bar"><i class="s" style="width:${w(parts[0])}%"></i><i class="t" style="width:${w(parts[1])}%"></i><i class="g" style="width:${w(parts[2])}%"></i></div>
+    <div class="keys"><div class="key"><span><i class="s"></i>${scrapLabel}</span><b>${inr(scrap)}</b></div><div class="key"><span><i class="t"></i>Transport</span><b>${inr(transport)}</b></div><div class="key g"><span><i class="g"></i>${gainLabel}</span><b>${inr(gain)}</b></div></div></div>`;
+}
+function split(v) {
+  if (!v || v.buyer_value_W <= 0) return `<p class="note">Donation: no buyer payment. It avoids a disposal cost of ${inr(-v.salvage_value_S)} at a transport cost of ${inr(v.transport_T)}.</p>`;
+  return ladder({scrap: v.salvage_value_S, transport: v.transport_T, gain: v.gain_G});
+}
+/* Count a number up once the drawing has settled (skipped when the visitor prefers reduced motion). */
+function countUp(el, to, delay, fmt = inr) {
+  if (!el) return;
+  if (REDUCED()) { el.textContent = fmt(to); return; }
+  el.textContent = fmt(0);
+  setTimeout(() => {
+    const t0 = performance.now(), dur = 700;
+    const step = t => { const k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 3); el.textContent = fmt(to * e); if (k < 1) requestAnimationFrame(step); };
+    requestAnimationFrame(step);
+  }, delay);
+}
+/* Side drawer */
+const drawer = {
+  last: null,
+  open(title, html) {
+    this.last = document.activeElement;
+    const d = $("#drawer");
+    d.innerHTML = `<div class="drawer-head"><h2 id="drawerTitle">${title}</h2><button class="btn sm ghost" type="button" data-close-drawer aria-label="Close">${ic("x")}</button></div><div class="drawer-body">${html}</div>`;
+    $("#drawerWrap").hidden = false; document.body.style.overflow = "hidden"; d.scrollTop = 0; d.focus();
+    return d;
+  },
+  close() { $("#drawerWrap").hidden = true; document.body.style.overflow = ""; if (this.last && this.last.focus) this.last.focus(); },
+};
+document.addEventListener("click", e => { if (e.target.closest("[data-close-drawer]")) drawer.close(); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#drawerWrap").hidden) drawer.close(); });
+/* Photos: the seller's own photo always wins; otherwise a credited illustrative photo; otherwise none. */
+function photoHtml(it) {
+  if (it.photo) return `<figure class="media"><img src="${esc(it.photo)}" alt="Photo of ${esc(it.id)} uploaded by the seller" loading="lazy"><figcaption class="ptag seller">${ic("camera", "sm")}Photo uploaded by the seller</figcaption></figure>`;
+  const il = it.illustrative;
+  if (!il) return "";
+  const credit = `${il.shows}. "${il.title}" by ${il.author}, ${il.licence}, via ${il.site || "Wikimedia Commons"}`;
+  return `<figure class="media" title="Illustrative photo, not the actual item. ${esc(credit)}"><img src="${esc(il.url)}" alt="Illustrative photo: ${esc(il.shows)}" loading="lazy"><figcaption class="ptag">Illustrative photo · <a href="${esc(il.source_url)}" target="_blank" rel="noopener" title="${esc(credit)}">Credit</a></figcaption></figure>`;
+}
+let CREDITS = null;
+async function credits() { if (!CREDITS) CREDITS = await fetch("/static/illustrative/credits.json").then(r => r.ok ? r.json() : {}).catch(() => ({})); return CREDITS; }
+/* Dimension lines for scale drawings (mm). */
+function dimLines(L, W, u) {
+  const t = u * 0.9, fs = u * 1.15, y = -u * 2.2, x = -u * 2.2;
+  return `<g class="dims" style="stroke:var(--mut);stroke-width:${u * 0.12}">
+    <line x1="0" y1="${y}" x2="${L}" y2="${y}"/><line x1="0" y1="${y - t / 2}" x2="0" y2="${y + t / 2}"/><line x1="${L}" y1="${y - t / 2}" x2="${L}" y2="${y + t / 2}"/>
+    <line x1="${x}" y1="0" x2="${x}" y2="${W}"/><line x1="${x - t / 2}" y1="0" x2="${x + t / 2}" y2="0"/><line x1="${x - t / 2}" y1="${W}" x2="${x + t / 2}" y2="${W}"/></g>
+    <text x="${L / 2}" y="${y - u * 0.55}" text-anchor="middle" style="font:500 ${fs}px var(--mono);fill:var(--mut)">${num(L)} mm</text>
+    <text transform="translate(${x - u * 0.6} ${W / 2}) rotate(-90)" text-anchor="middle" style="font:500 ${fs}px var(--mono);fill:var(--mut)">${num(W)} mm</text>`;
+}
+
 /* ---------------- state and navigation ---------------- */
 const LANES = {durable: {name: "Durable", cls: "np", scen: ["steel", "sheets", "bars"]}, fresh: {name: "Fresh", cls: "pe", scen: ["food"]}};
 const ROLES = {buyer: "Buyer", seller: "Seller", admin: "Admin"};
+// [view, title, icon, lane only]
 const NAV = {
-  buyer: [["post", "Post a requirement", null, "Marketplace"], ["browse", "Browse surplus"], ["match", "Order and match"],
-    ["reqs", "My requirements", null, "My orders"], ["deals", "My deals"], ["pickup", "Pickup and delivery"]],
-  seller: [["connect", "Connect your system"], ["gapfill", "Sold before it's cut", "durable"], ["offers", "Offers and recovery plan"], ["stock", "Stock and passports"], ["pickup", "Pickup and delivery"]],
-  admin: [["monitor", "Deal monitor"], ["quality", "Data quality"], ["prices", "Price references"], ["rules", "Rules"], ["sim", "Simulation lab"]],
+  seller: [["My workshop", [["connect", "Connect your system", "plug"], ["gapfill", "Sold before it's cut", "scissors", "durable"], ["stock", "Stock and passports", "qr-code"], ["offers", "Offers and recovery plan", "route"]]],
+    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]]],
+  buyer: [["Marketplace", [["post", "Post a requirement", "file-plus-2"], ["browse", "Browse surplus", "search"], ["match", "Order and match", "layers"]]],
+    ["My orders", [["reqs", "My requirements", "clipboard-list"], ["deals", "My deals", "receipt"]]],
+    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]]],
+  admin: [["Platform", [["monitor", "Deal monitor", "gauge"], ["quality", "Data quality", "shield-check"], ["prices", "Price references", "banknote"], ["rules", "Rules", "list-checks"], ["sim", "Simulation lab", "flask-conical"]]]],
 };
 const TITLES = {
-  connect: ["Connect your system", "Import from ERP or POS export (CSV). Upload the stock file your system exports; the engine checks every row and finds the surplus."],
-  post: ["Post a requirement", "Say what you need. Find it now in every seller's stock, or keep it open as a standing order for workshops about to cut."],
-  reqs: ["My requirements", "Everything you posted, with its status. Find it again or close it."],
-  browse: ["Browse surplus", "Every piece and lot on offer, drawn to scale, with its seller, distance and price range."],
-  pickup: ["Pickup and delivery", "Route, vehicle and transport cost come from the engine. Book a slot, print the papers, track the deal."],
-  match: ["Order and match", "Say what you need. The engine checks every seller's stock, nests the parts and finds the cheapest pickup."],
+  connect: ["Connect your system", "Bring in your stock from any ERP or billing software. The app checks every row and finds what is surplus."],
+  post: ["Post a requirement", "Say what you need. Find it in sellers' stock today, or keep it open so a workshop can cut it from the spare part of its next sheet."],
+  reqs: ["My requirements", "Everything you have posted, and where each one stands."],
+  browse: ["Browse surplus", "Pieces and lots on offer near you, each with a fair price range and the seller's distance."],
+  pickup: ["Pickup and delivery", "One route, the right vehicle and the papers for the driver. Transporters and bookings are simulated."],
+  match: ["Order and match", "Pick an order. The app finds who can supply it, how to cut it and the cheapest pickup."],
   deals: ["My deals", "Track each order from agreed to dispatched to delivered."],
-  gapfill: ["Sold before it's cut", "Fill the empty space in your cutting plan with parts your neighbours have already ordered."],
+  gapfill: ["Sold before it's cut", "Sell the empty part of your next sheet to nearby buyers before you cut it."],
   offers: ["Offers and recovery plan", "Which buyers to try, in which order, before the deadline. Scrap or disposal is the last step."],
   stock: ["Stock and passports", "Every piece or lot, its scrap value, and a passport with a QR code."],
   monitor: ["Deal monitor", "Every deal by stage. Simulated deals are never counted as verified."],
@@ -44,43 +141,50 @@ const TITLES = {
   rules: ["Rules", "What the engine checks before it accepts a piece or a lot."],
   sim: ["Simulation lab", "Gap Fill tested on 5,000 simulated sheets. Simulated, sample prices."],
 };
-const st = {lane: "durable", role: "seller", view: "gapfill", scen: {durable: "steel", fresh: "food"}, ord: {}, rate: {}, off: {},
-  plan: {rejected: [], elapsed: 0, key: null}, deadline: {}, gf: null, gfDeclined: [], sellerFilter: "", lastDeal: null,
+const st = {lane: "durable", role: "seller", view: "welcome", scen: {durable: "steel", fresh: "food"}, ord: {}, rate: {}, off: {},
+  plan: {rejected: [], elapsed: 0, key: null}, deadline: {}, gf: null, gfDeclined: [], gfOpen: false, sellerFilter: "", lastDeal: null,
   imp: {durable: {}, fresh: {}}, ordId: {}, postKind: "flat", post: {flat: null, linear: null, perishable: null}, postErr: {}, postMsg: null,
   man: {durable: {material: "mild_steel", length_mm: "", width_mm: "", thickness_mm: "", grade: "E250", condition: "good", is_full_sheet: false, days_unused: "", seller_id: ""},
     fresh: {product: "", category: "vegetables", quantity_kg: "", storage: "ambient", hours_left: "", use_by: "", mode: "hours", seller_id: ""}},
-  manPhoto: {durable: null, fresh: null}, manErr: {durable: {}, fresh: {}}, manRes: {durable: null, fresh: null}, manMeasured: {durable: false, fresh: false}, br: {durable: {q: "", mat: "", thick: "", seller: "", sort: "distance"}, fresh: {q: "", mat: "", thick: "", seller: "", sort: "hours"}}, impLimit: {days: 30, hours: 24}, impMeasured: false,
+  manPhoto: {durable: null, fresh: null}, manErr: {durable: {}, fresh: {}}, manRes: {durable: null, fresh: null}, manMeasured: {durable: false, fresh: false},
+  br: {durable: {q: "", mat: "", thick: "", seller: "", dist: "", sort: "distance"}, fresh: {q: "", mat: "", thick: "", seller: "", dist: "", sort: "hours"}}, impLimit: {days: 30, hours: 24}, impMeasured: false,
   job: {sheet_length_mm: 2500, sheet_width_mm: 1250, thickness_mm: 6, grade: "E250", part_name: "base plate", part_length_mm: 450, part_width_mm: 350, quantity: 9}};
 
-function navFor(role, lane) { return NAV[role].filter(n => !n[2] || n[2] === lane); }
+function navFor(role, lane) { return NAV[role].flatMap(([, items]) => items).filter(n => !n[3] || n[3] === lane); }
 function readHash() {
-  const [role, view, lane] = location.hash.slice(1).split("/");
+  const h = location.hash.slice(1);
+  if (!h) { st.view = "welcome"; return; }
+  const [role, view, lane] = h.split("/");
   if (ROLES[role]) st.role = role;
   if (LANES[lane]) st.lane = lane;
   if (view && navFor(st.role, st.lane).some(n => n[0] === view)) st.view = view;
-  else if (!navFor(st.role, st.lane).some(n => n[0] === st.view)) st.view = navFor(st.role, st.lane)[0][0];
+  else st.view = navFor(st.role, st.lane)[0][0];
 }
 function go(patch) {
   Object.assign(st, patch);
-  if (!navFor(st.role, st.lane).some(n => n[0] === st.view)) st.view = navFor(st.role, st.lane)[0][0];
-  history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`);
+  if (st.view !== "welcome" && !navFor(st.role, st.lane).some(n => n[0] === st.view)) st.view = navFor(st.role, st.lane)[0][0];
+  history.replaceState(null, "", st.view === "welcome" ? location.pathname + location.search : `#${st.role}/${st.view}/${st.lane}`);
   render();
 }
 function shell() {
   $("#lane").className = "seg " + LANES[st.lane].cls;
   $("#lane").innerHTML = Object.entries(LANES).map(([k, v]) => `<button type="button" data-lane="${k}" aria-pressed="${k === st.lane}">${v.name}</button>`).join("");
   $("#role").innerHTML = Object.entries(ROLES).map(([k, v]) => `<button type="button" data-role="${k}" aria-pressed="${k === st.role}">${v}</button>`).join("");
-  $("#nav").innerHTML = `<h6>${ROLES[st.role]} · ${LANES[st.lane].name}</h6>` + navFor(st.role, st.lane).map(([k, t, , grp]) =>
-    `${grp ? `<h6 class="grp">${esc(grp)}</h6>` : ""}<button type="button" data-view="${k}" ${k === st.view ? 'aria-current="page"' : ""}>${esc(t)}</button>`).join("") +
-    (st.role === "seller" && st.lane === "fresh" ? `<p class="railnote">Sold before it's cut applies to sheet cutting, so it lives in the Durable lane.</p>` : "");
+  $("#nav").innerHTML = NAV[st.role].map(([grp, items]) => {
+    const vis = items.filter(n => !n[3] || n[3] === st.lane);
+    return vis.length ? `<h6>${esc(grp)}</h6>` + vis.map(([k, t, icon]) => `<button type="button" data-view="${k}" ${k === st.view ? 'aria-current="page"' : ""}>${ic(icon)}<span>${esc(t)}</span></button>`).join("") : "";
+  }).join("") + (st.role === "seller" && st.lane === "fresh" ? `<p class="railnote">Sold before it's cut is about cutting sheet, so it lives in the Durable lane.</p>` : "");
 }
 document.addEventListener("click", e => {
+  const home = e.target.closest(".brand");
+  if (home) { e.preventDefault(); go({view: "welcome"}); return; }
   const b = e.target.closest("[data-lane],[data-role],[data-view]");
   if (!b || !b.closest(".rail,.topbar")) return;
   if (b.dataset.lane) go({lane: b.dataset.lane});
   else if (b.dataset.role) go({role: b.dataset.role, view: navFor(b.dataset.role, st.lane)[0][0]});
   else go({view: b.dataset.view});
 });
+window.addEventListener("hashchange", () => { readHash(); render(); });
 
 /* ---------------- shared pieces ---------------- */
 const SC = {};
@@ -107,25 +211,14 @@ async function scenSeg() {
 function bindScen(el) {
   el.querySelectorAll("[data-scen]").forEach(b => b.onclick = () => { st.scen[st.lane] = b.dataset.scen; st.plan = {rejected: [], elapsed: 0, key: null}; render(); });
 }
-const chip = l => {
-  const m = {sample: "p-warn", assumption: "p-warn", simulated: "p-mut", modelled: "p-mut", measured: "p-ok", verified: "p-ok"};
-  return `<span class="pill ${m[l] || "p-mut"}">${esc(l)}</span>`;
-};
-function split(v) {
-  if (!v || v.buyer_value_W <= 0) return `<p class="note">Donation: no buyer payment. It avoids a disposal cost of ${inr(-v.salvage_value_S)} at a transport cost of ${inr(v.transport_T)}.</p>`;
-  const W = v.buyer_value_W, s = Math.max(v.salvage_value_S, 0), t = v.transport_T, g = Math.max(v.gain_G, 0);
-  return `<div class="split" role="img" aria-label="Split of the buyer's value"><i class="s" style="width:${s / W * 100}%"></i><i class="t" style="width:${t / W * 100}%"></i><i class="g" style="width:${g / W * 100}%"></i></div>
-  <div class="leg"><span><i class="s"></i>Seller's alternative (scrap or disposal)</span><span><i class="t"></i>Transport</span><span><i class="g"></i>Value created</span></div>`;
-}
 function sheetSvg(a) {
   const L = a.length_mm, W = a.width_mm, sc = 300 / Math.max(L, W), w = L * sc, h = W * sc;
   return `<figure class="sheet"><svg viewBox="-2 -2 ${w + 4} ${h + 4}" role="img" aria-label="Cutting plan ${esc(a.resource_id)}"><rect class="piece" x="0" y="0" width="${w}" height="${h}"/>${
     (a.defects || []).map(d => `<rect x="${d.x_mm * sc}" y="${d.y_mm * sc}" width="${d.length_mm * sc}" height="${d.width_mm * sc}" style="fill:var(--bad);opacity:.35"/>`).join("")}${
-    a.parts.map(p => `<rect class="pt" x="${p.x * sc}" y="${p.y * sc}" width="${p.length * sc}" height="${p.width * sc}"/>`).join("")}</svg><figcaption>${esc(a.resource_id)} · ${num(L)}×${num(W)} mm · ${a.units} parts</figcaption></figure>`;
+    a.parts.map(p => `<rect class="pt" x="${p.x * sc}" y="${p.y * sc}" width="${p.length * sc}" height="${p.width * sc}"/>`).join("")}</svg><figcaption>${esc(a.resource_id)} · ${num(L)} × ${num(W)} mm · ${a.units} parts</figcaption></figure>`;
 }
-const errBox = e => `<div class="err" role="alert">${esc(e.message || e)}</div>`;
 
-/* ---------------- What can this become? (shared by Browse surplus) ---------------- */
+/* ---------------- What can this become? (Browse surplus drawer) ---------------- */
 function barSvg(det) {
   const L = det.length_mm;
   return `<svg class="bplan" viewBox="0 0 ${L} 140" role="img" aria-label="${det.cuts.length} cuts along the bar"><rect x="0" y="40" width="${L}" height="60" style="fill:var(--piece);stroke:var(--mut);stroke-width:${L / 200}"/>${det.cuts.map(c => `<rect x="${c.start_mm}" y="40" width="${c.length_mm}" height="60" style="fill:var(--part);stroke:var(--partl);stroke-width:${L / 400}"/>`).join("")}</svg>`;
@@ -134,21 +227,22 @@ function becomeHtml(b, top) {
   const fresh = b.kind === "perishable", base = fresh ? "disposal" : "scrap";
   const money = o => {
     if (o.value_above_scrap == null) return `<span class="note">Count only: no new price for this material in the cluster.</span>`;
-    if (o.is_donation) return `<span class="note">Donation: avoids ${inr(-o.scrap_value)} disposal; pickup ${inr(o.transport)}.</span>`;
+    if (o.is_donation) return `<span class="note">Donation: avoids ${inr(-o.scrap_value)} disposal, pickup ${inr(o.transport)}.</span>`;
     const v = o.value_above_scrap;
-    return `<b class="bval ${v < 0 ? "neg" : ""}">${inr(Math.abs(v))}</b> <span class="note">${v < 0 ? "below" : "above"} ${base}</span>`;
+    return `<div><b class="bval ${v < 0 ? "neg" : ""}">${inr(Math.abs(v))}</b> <span class="note">${v < 0 ? "below" : "above"} ${base} value</span></div>`;
   };
-  const what = o => fresh ? `${num(o.units, 1)} kg to ${esc(o.buyer_name)}` : `${num(o.units)} × ${esc(o.part_name)}`;
+  const what = o => fresh ? `${num(o.units, 1)} kg to ${esc(short(o.buyer_name))}` : `${num(o.units)} × ${esc(o.part_name)}`;
   const size = o => fresh ? `${num(o.hours_on_arrival, 1)} h left on arrival (needs ${num(o.min_hours_on_arrival)} h)` : o.part_mm ? `${num(o.part_mm[0])} × ${num(o.part_mm[1])} mm${o.wanted ? ` · order wants ${num(o.wanted)}` : ""}` : `${num(o.cut_length_mm)} mm cuts · order wants ${num(o.wanted)}`;
   const draw = o => o.detail && o.detail.shape === "sheet" ? sheetSvg({...o.detail, resource_id: "", units: o.units}).replace(/<figcaption>.*<\/figcaption>/, "") : o.detail && o.detail.shape === "bar" ? barSvg(o.detail) : "";
-  const card = o => `<div class="bopt ${o.source === "reference" ? "ref" : ""}">${draw(o) ? `<div class="bdraw">${draw(o)}</div>` : ""}<div class="bbody"><span class="pill ${o.source === "reference" ? "p-mut" : "p-ok"}">${esc(o.label)}</span>
-    <b>${what(o)}</b><span class="note">${size(o)}</span><div>${money(o)}</div></div></div>`;
+  const label = o => o.source === "reference" ? `<span class="pill p-mut" title="A common part size at this thickness. No buyer has ordered it yet.">${esc(o.label)}</span>` : `<span class="pill p-ok" title="A buyer has an open order for this.">${esc(o.label.replace(/^Ordered by (.*?)(, [^(]*)?( \(standing order\))?$/, (m, n, loc, s) => `Ordered by ${n}${s || ""}`))}</span>`;
+  const card = o => `<div class="bopt ${o.source === "reference" ? "ref" : ""}">${draw(o) ? `<div class="bdraw">${draw(o)}</div>` : ""}<div class="bbody">${label(o)}
+    <b>${what(o)}</b><span class="note">${size(o)}</span>${money(o)}</div></div>`;
   const opts = b.options, shown = opts.slice(0, top), more = opts.slice(top);
-  const sc = b.scrap ? `Compared with ${base}: ${inr(Math.abs(b.scrap.value))} at ₹${num(Math.abs(b.scrap.price_per_kg), 1)}/kg · ${esc(cap1(b.scrap.label))} · ${b.scrap.quoted_on ? "quoted " + esc(b.scrap.quoted_on) : "no date"}.` : "";
-  return `<div class="bwrap"><p class="note">${sc} Ranked by value above ${base}. Prices are sample data.</p>
-    ${shown.length ? shown.map(card).join("") : `<p class="note">Nothing in this lane can use it right now.</p>`}
-    ${more.length ? `<details><summary>${more.length} more option(s)</summary>${more.map(card).join("")}</details>` : ""}
-    ${b.refused.length ? `<details><summary>Not possible (${b.refused.length})</summary><ul class="rej">${b.refused.map(r => `<li><b>${esc(r.label)}: ${esc(r.part_name)}</b> ${esc(r.reason)}</li>`).join("")}</ul></details>` : ""}</div>`;
+  const sc = b.scrap ? `Compared with its ${base} value of ${inr(Math.abs(b.scrap.value))} (₹${num(Math.abs(b.scrap.price_per_kg), 1)}/kg, ${esc(b.scrap.label)}, ${b.scrap.quoted_on ? "quoted " + esc(b.scrap.quoted_on) : "no date"}).` : "";
+  return `<div class="bwrap"><p class="note">${sc} Real buyers first, then common parts. Prices are sample data.</p>
+    ${shown.length ? shown.map(card).join("") : `<p class="note">Nothing in this lane can use it right now. The reasons are below.</p>`}
+    ${more.length ? `<details><summary>${more.length} more option${more.length === 1 ? "" : "s"}</summary>${more.map(card).join("")}</details>` : ""}
+    ${b.refused.length ? `<details><summary>Not possible (${b.refused.length})</summary><ul class="rej">${b.refused.map(r => `<li><b>${esc(r.label === "Common part, no buyer yet" ? "Common part" : r.label)}: ${esc(r.part_name)}</b> ${esc(r.reason)}</li>`).join("")}</ul></details>` : ""}</div>`;
 }
 
 /* ---------------- Buyer: post a requirement, and my requirements ---------------- */
@@ -174,44 +268,46 @@ async function vPost(el) {
   const num_ = (k, mode = "decimal", ph = "") => `<input data-post="${k}" type="number" inputmode="${mode}" ${mode === "numeric" ? 'pattern="[0-9]*" step="1"' : 'step="any"'} min="0" placeholder="${ph}" value="${esc(F[k])}" ${bad(k)}>`;
   const txt = (k, ph = "") => `<input data-post="${k}" type="text" placeholder="${esc(ph)}" value="${esc(F[k])}" ${bad(k)}>`;
   const chips = (k, opts) => `<div class="chips">${opts.map(([v, t]) => `<label><input type="checkbox" data-chip="${k}" value="${esc(v)}" ${F[k].includes(v) ? "checked" : ""}>${esc(t)}</label>`).join("")}</div>`;
-  const words = v => v.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
   const mat = O.materials.find(x => x.key === F.material);
-  let fields;
-  if (kind === "flat") fields = [
-    fld("part_name", "Part name", txt("part_name", "e.g. mounting bracket"), "wide"),
-    fld("material", "Material", `<select data-post="material" ${bad("material")}>${O.materials.map(m => `<option value="${m.key}" ${m.key === F.material ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>`),
-    fld("length_mm", "Length mm", num_("length_mm", "decimal", "e.g. 150")), fld("width_mm", "Width mm", num_("width_mm", "decimal", "e.g. 100")),
-    fld("thickness_mm", "Thickness mm", num_("thickness_mm", "decimal", "e.g. 2")), fld("quantity", "Quantity", num_("quantity", "numeric", "e.g. 50")),
-    grp("accepted_grades", "Accepted grades", mat && mat.grades.length ? chips("accepted_grades", mat.grades.map(g => [g, g])) : txt("grades_text", "Type grades, comma separated"), "wide"),
-    grp("accepted_conditions", "Accepted conditions", chips("accepted_conditions", O.conditions.map(c => [c, words(c)])), "wide")];
-  else if (kind === "linear") fields = [
-    fld("part_name", "Part name", txt("part_name", "e.g. baluster"), "wide"),
-    fld("profile", "Profile", `<select data-post="profile" ${bad("profile")}>${O.profiles.map(x => `<option value="${esc(x.profile)}" ${x.profile === F.profile ? "selected" : ""}>${esc(x.profile)} · ${num(x.mass_per_m_kg, 2)} kg/m</option>`).join("")}</select>`),
-    fld("cut_length_mm", "Cut length mm", num_("cut_length_mm", "decimal", "e.g. 450")), fld("quantity", "Quantity", num_("quantity", "numeric", "e.g. 30")),
-    grp("accepted_grades", "Accepted grades", chips("accepted_grades", O.bar_grades.map(g => [g, g])), "wide"),
-    grp("accepted_conditions", "Accepted conditions", chips("accepted_conditions", O.conditions.map(c => [c, words(c)])), "wide")];
-  else fields = [
-    grp("categories", "What is needed", chips("categories", O.categories.map(c => [c, words(c)])), "wide"),
-    fld("quantity", "Kg", num_("quantity", "decimal", "e.g. 20")), fld("min_hours_left_on_arrival", "Minimum hours of shelf life on arrival", num_("min_hours_left_on_arrival", "decimal", "e.g. 6")),
-    grp("storage_available", "Storage you have", chips("storage_available", O.storage.map(c => [c, words(c)])), "wide"),
-    grp("buyer_type", "Buyer type", `<div class="opts">${O.buyer_types.map(b => `<label><input type="radio" name="postBt" value="${b.key}" ${F.buyer_type === b.key ? "checked" : ""}>${esc(b.name)}</label>`).join("")}</div>`, "wide")];
-  const priceLabel = kind === "perishable" ? "What you pay your usual supplier ₹/kg" : "What you pay for new material ₹/kg";
-  const priceNote = kind === "perishable" && F.buyer_type === "food_bank" ? "A donation: no price is charged." : "Prefilled with the cluster's sample price. Change it to what you really pay.";
-  fields.push(
-    kind === "perishable" && F.buyer_type === "food_bank" ? "" : fld(kind === "perishable" ? "normal_price_per_kg" : "new_price_per_kg", priceLabel, num_(kind === "perishable" ? "normal_price_per_kg" : "new_price_per_kg", "decimal")),
-    kind === "perishable" && F.buyer_type !== "food_bank" ? `<label class="check mfield"><input type="checkbox" data-post-check="buyer_fssai_licensed" ${F.buyer_fssai_licensed ? "checked" : ""}> We hold an FSSAI licence or registration</label>` : "",
+  const group = (n, title, body) => `<div class="fgroup"><h3><span class="stepno">${n}</span>${title}</h3><div class="mgrid">${body.join("")}</div></div>`;
+  let g1, g2;
+  if (kind === "flat") {
+    g1 = [fld("part_name", "Part name", txt("part_name", "e.g. mounting bracket"), "wide"),
+      fld("material", "Material", `<select data-post="material" ${bad("material")}>${O.materials.map(m => `<option value="${m.key}" ${m.key === F.material ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select>`),
+      fld("quantity", "How many", num_("quantity", "numeric", "e.g. 50")),
+      fld("length_mm", "Length (mm)", num_("length_mm", "decimal", "e.g. 150")), fld("width_mm", "Width (mm)", num_("width_mm", "decimal", "e.g. 100")),
+      fld("thickness_mm", "Thickness (mm)", num_("thickness_mm", "decimal", "e.g. 2"))];
+    g2 = [grp("accepted_grades", "Grades you accept", mat && mat.grades.length ? chips("accepted_grades", mat.grades.map(g => [g, g])) : txt("grades_text", "Type grades, separated by commas"), "wide"),
+      grp("accepted_conditions", "Conditions you accept", chips("accepted_conditions", O.conditions.map(c => [c, words(c)])), "wide")];
+  } else if (kind === "linear") {
+    g1 = [fld("part_name", "Part name", txt("part_name", "e.g. baluster"), "wide"),
+      fld("profile", "Bar or tube", `<select data-post="profile" ${bad("profile")}>${O.profiles.map(x => `<option value="${esc(x.profile)}" ${x.profile === F.profile ? "selected" : ""}>${esc(cap1(x.profile))} · ${num(x.mass_per_m_kg, 2)} kg/m</option>`).join("")}</select>`),
+      fld("cut_length_mm", "Cut length (mm)", num_("cut_length_mm", "decimal", "e.g. 450")), fld("quantity", "How many", num_("quantity", "numeric", "e.g. 30"))];
+    g2 = [grp("accepted_grades", "Grades you accept", chips("accepted_grades", O.bar_grades.map(g => [g, g])), "wide"),
+      grp("accepted_conditions", "Conditions you accept", chips("accepted_conditions", O.conditions.map(c => [c, words(c)])), "wide")];
+  } else {
+    g1 = [grp("categories", "What you need", chips("categories", O.categories.map(c => [c, words(c)])), "wide"), fld("quantity", "How much (kg)", num_("quantity", "decimal", "e.g. 20"))];
+    g2 = [grp("storage_available", "Storage you have", chips("storage_available", O.storage.map(c => [c, words(c)])), "wide"),
+      fld("min_hours_left_on_arrival", "Shelf life needed on arrival (hours)", num_("min_hours_left_on_arrival", "decimal", "e.g. 6")),
+      grp("buyer_type", "You are a", `<div class="opts">${O.buyer_types.map(b => `<label><input type="radio" name="postBt" value="${b.key}" ${F.buyer_type === b.key ? "checked" : ""}>${esc(b.name)}</label>`).join("")}</div>`, "wide"),
+      F.buyer_type !== "food_bank" ? `<label class="check mfield wide"><input type="checkbox" data-post-check="buyer_fssai_licensed" ${F.buyer_fssai_licensed ? "checked" : ""}> We hold an FSSAI licence or registration</label>` : ""];
+  }
+  const priceKey = kind === "perishable" ? "normal_price_per_kg" : "new_price_per_kg";
+  const g3 = [fld("buyer_name", "Your business name", txt("buyer_name", "e.g. Ezhil Engineering Works"), "wide"),
     fld("needed_by", "Needed by", `<input data-post="needed_by" type="date" min="${new Date().toISOString().slice(0, 10)}" value="${esc(F.needed_by)}" ${bad("needed_by")}>`),
-    fld("buyer_name", "Your business name", txt("buyer_name", "e.g. Workshop W"), "wide"),
-    fld("x_km", "Location x km", num_("x_km", "decimal")), fld("y_km", "Location y km", num_("y_km", "decimal")));
-  const msg = st.postMsg && st.postMsg.lane === lane ? `<div class="mres ok" role="status"><b>Saved as a standing order: ${esc(st.postMsg.demand_id)}</b><p>It now appears in Seller &gt; Sold before it's cut and in "What can this become?" as "Ordered by ${esc(st.postMsg.buyer)}".</p><div class="ctrl"><button class="btn sm" type="button" id="toReqs">See My requirements</button></div></div>` : "";
-  el.innerHTML = `<div class="card manual"><div class="ctrl"><h2>Your requirement</h2>${chip("sample")}<div class="grow"></div>
-      ${lane === "durable" ? `<div class="opts kindsw" role="radiogroup" aria-label="What kind of part"><label><input type="radio" name="postKind" value="flat" ${kind === "flat" ? "checked" : ""}>Sheet parts</label><label><input type="radio" name="postKind" value="linear" ${kind === "linear" ? "checked" : ""}>Bars and tubes</label></div>` : ""}</div>
-    <p class="mut">Checked with the same order rules the engine uses. Location is km on the demo grid; the default is near the centre of the cluster.</p>
-    <form id="postForm" novalidate><div class="mgrid">${fields.join("")}</div>
-      ${E.kind || E.standing ? `<p class="err">${esc(E.kind || E.standing)}</p>` : ""}
-      <div class="ctrl"><button class="btn pri bigbtn" type="submit" id="postFind">Find it now</button>
-        ${kind === "flat" ? `<button class="btn bigbtn" type="button" id="postStanding">Keep it open as a standing order</button>` : ""}
-        <span class="note">${esc(priceNote)}</span></div></form>${msg}</div>`;
+    kind === "perishable" && F.buyer_type === "food_bank" ? "" : fld(priceKey, kind === "perishable" ? "What you pay your usual supplier (₹/kg)" : "What new material costs you (₹/kg)", num_(priceKey, "decimal")),
+    fld("x_km", "Your location: x (km on the demo map)", num_("x_km", "decimal")), fld("y_km", "Your location: y (km)", num_("y_km", "decimal"))];
+  const msg = st.postMsg && st.postMsg.lane === lane ? `<div class="mres ok" role="status"><b>Saved as a standing order (${esc(st.postMsg.demand_id)})</b><p>Workshops see it in Sold before it's cut, and it shows in "What can this become?" as "Ordered by ${esc(short(st.postMsg.buyer))}".</p><div class="ctrl"><button class="btn sm" type="button" id="toReqs">See my requirements</button></div></div>` : "";
+  el.innerHTML = `<div class="card"><form id="postForm" class="form" novalidate>
+      <div class="ctrl"><h2>Your requirement</h2>${badge("sample", "Demo")}${lane === "durable" ? `<div class="grow"></div><div class="opts kindsw" role="radiogroup" aria-label="What kind of part"><label><input type="radio" name="postKind" value="flat" ${kind === "flat" ? "checked" : ""}>Sheet parts</label><label><input type="radio" name="postKind" value="linear" ${kind === "linear" ? "checked" : ""}>Bars and tubes</label></div>` : ""}</div>
+      ${group(1, kind === "perishable" ? "What you need" : "The part", g1)}
+      ${group(2, kind === "perishable" ? "How you can receive it" : "What you accept", g2)}
+      ${group(3, "You, and when you need it", g3)}
+      ${E.kind || E.standing ? `<p class="err">${ic("triangle-alert")}${esc(E.kind || E.standing)}</p>` : ""}
+      <div class="actions"><button class="btn pri lg" type="submit" id="postFind">${ic("search")}Find it now</button>
+        ${kind === "flat" ? `<button class="btn lg" type="button" id="postStanding">${ic("clock")}Keep it open as a standing order</button>` : ""}
+        <p class="note">${kind === "flat" ? "Find it now searches every seller's stock today. A standing order stays open, so a workshop can cut your parts from the spare part of its next sheet." : "Find it now searches every seller's stock today."} The price is prefilled with the cluster's sample price; change it to what you really pay.</p></div>
+    </form>${msg}</div>`;
   const form = $("#postForm", el);
   form.querySelectorAll("[data-post]").forEach(i => { i.oninput = i.onchange = () => {
     F[i.dataset.post] = i.value;
@@ -238,12 +334,13 @@ async function vPost(el) {
     if (kind === "perishable" && F.buyer_type === "food_bank") delete fields.normal_price_per_kg;
     let r, t;
     try { r = await fetch("/api/requirements", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({lane, kind, fields, needed_by, standing})}); t = await r.json().catch(() => ({})); }
-    catch (x) { st.postErr = {kind: "The app could not be reached. Check that it is still running and try again."}; return render(); }
-    if (!r.ok) { st.postErr = t.detail && t.detail.errors ? t.detail.errors : {kind: typeof t.detail === "string" ? t.detail : "Something went wrong."}; st.postMsg = null; await render();
+    catch (x) { st.postErr = {kind: "The app could not be reached. Check that it is still running, then try again."}; return render(); }
+    if (!r.ok) { st.postErr = t.detail && t.detail.errors ? t.detail.errors : {kind: typeof t.detail === "string" ? t.detail : "Something went wrong. Try again."}; st.postMsg = null; await render();
       const first = document.querySelector('#postForm [aria-invalid="true"], #postForm .ferr:not(:empty)'); if (first) (first.matches("input,select") ? first : first.parentElement.querySelector("input,select") || first).focus?.(); return; }
     st.postErr = {}; st.post[kind] = null;
-    if (standing) { st.postMsg = {lane, demand_id: t.demand_id, buyer: t.demand.buyer_name}; return render(); }
+    if (standing) { st.postMsg = {lane, demand_id: t.demand_id, buyer: t.demand.buyer_name}; toast(`Standing order ${esc(t.demand_id)} saved. Workshops can now cut it from their next sheet.`); return render(); }
     st.postMsg = null; st.scen[lane] = t.scenario; st.ordId[t.scenario] = t.demand_id; st.off[t.scenario] = new Set();
+    toast(`Requirement ${esc(t.demand_id)} saved. Here is what the sellers can supply.`);
     go({view: "match"});
   };
   form.onsubmit = e => { e.preventDefault(); send(false); };
@@ -252,8 +349,8 @@ async function vPost(el) {
 async function vReqs(el) {
   const r = await api(`/api/requirements?lane=${st.lane}`), list = r.requirements;
   if (!list.length) {
-    el.innerHTML = `<div class="empty">No requirements yet. <a href="#buyer/post/${st.lane}" id="toPost">Post a requirement</a> and it will be listed here with its status.</div>`;
-    $("#toPost", el).onclick = e => { e.preventDefault(); go({view: "post"}); };
+    el.innerHTML = emptyState("clipboard-list", "You have not posted anything yet. Post what you need and it will be listed here with its status.", `<button class="btn pri" type="button" id="toPost">${ic("file-plus-2")}Post a requirement</button>`);
+    $("#toPost", el).onclick = () => go({view: "post"});
     return;
   }
   const pill = {open: "p-mut", reserved: "p-warn", matched: "p-ok", closed: "p-mut"};
@@ -261,129 +358,146 @@ async function vReqs(el) {
     return q.kind === "perishable" ? `${num(d.quantity, 1)} kg of ${d.categories.map(c => c.replace(/_/g, " ")).join(", ")} · ${d.storage_available.join(", ")} · ${num(d.min_hours_left_on_arrival)} h on arrival${d.buyer_type === "ngo" ? " · donation" : ""}`
       : q.kind === "linear" ? `${num(d.quantity)} × ${esc(d.part_name)} · ${esc(d.profile)} · ${num(d.cut_length_mm)} mm`
       : `${num(d.quantity)} × ${esc(d.part_name)} · ${num(d.length_mm)} × ${num(d.width_mm)} × ${num(d.thickness_mm, d.thickness_mm % 1 ? 1 : 0)} mm ${esc(d.material.replace(/_/g, " "))} · ${d.accepted_grades.map(esc).join("/")}`; };
-  el.innerHTML = `<div class="card"><div class="scroll"><table><tr><th>Id</th><th>Buyer</th><th>What</th><th>Needed by</th><th>Status</th><th class="noprint"></th></tr>${list.map(q => `<tr ${q.status === "closed" ? 'class="closed"' : ""}>
-      <td><code>${esc(q.demand_id)}</code>${q.standing ? '<div><span class="pill p-mut">Standing order</span></div>' : ""}</td><td>${esc(q.demand.buyer_name)}</td><td class="w">${what(q)}</td>
+  el.innerHTML = `<div class="card"><div class="scroll"><table><tr><th>Requirement</th><th>What</th><th>Needed by</th><th>Status</th><th class="noprint"></th></tr>${list.map(q => `<tr ${q.status === "closed" ? 'class="closed"' : ""}>
+      <td><b>${esc(orderName(q.demand))}</b> ${codeTag(q.demand_id)}${q.standing ? '<div><span class="pill p-mut" title="Kept open for workshops about to cut">Standing order</span></div>' : ""}</td><td class="w">${what(q)}</td>
       <td>${q.needed_by ? esc(q.needed_by) : "–"}</td><td class="w"><span class="pill ${pill[q.status]}">${esc(q.status)}</span><div class="note">${esc(q.status_text)}</div></td>
-      <td class="noprint"><span class="ctrl">${q.status !== "closed" ? `<button class="btn sm" type="button" data-find="${q.id}">Find again</button>` : ""}${q.status === "open" || q.status === "reserved" ? `<button class="btn sm" type="button" data-close="${q.id}">Close</button>` : ""}</span></td></tr>`).join("")}</table></div>
-    <p class="note">${esc(r.requirements[0].note)}. Reserved means a seller's Sold before it's cut plan includes your parts; if the seller declines, it goes back to Open.</p></div>`;
+      <td class="noprint"><span class="ctrl">${q.status !== "closed" ? `<button class="btn sm" type="button" data-find="${q.id}">Find again</button>` : ""}${q.status === "open" || q.status === "reserved" ? `<button class="btn sm ghost" type="button" data-close="${q.id}">Close</button>` : ""}</span></td></tr>`).join("")}</table></div>
+    <p class="note">${badge("posted")} Reserved means a workshop's cutting plan includes your parts; if the workshop declines, it goes back to Open.</p></div>`;
   el.querySelectorAll("[data-find]").forEach(b => b.onclick = () => {
     const q = list.find(x => x.id === +b.dataset.find);
     st.scen[st.lane] = q.scenario; st.ordId[q.scenario] = q.demand_id; st.off[q.scenario] = new Set(); go({view: "match"});
   });
-  el.querySelectorAll("[data-close]").forEach(b => b.onclick = async () => { await api(`/api/requirements/${b.dataset.close}/close`, {}); render(); });
+  el.querySelectorAll("[data-close]").forEach(b => b.onclick = async () => { await api(`/api/requirements/${b.dataset.close}/close`, {}); toast("Requirement closed."); render(); });
 }
 
-/* ---------------- Buyer: browse surplus (marketplace listings) ---------------- */
-const cap = s => s ? s[0].toUpperCase() + s.slice(1) : "";
-const labelChip = l => l === "measured" ? chip("measured") : chip(l || "sample");
-function pieceSvg(it) {
+/* ---------------- Buyer: browse surplus (marketplace) ---------------- */
+const cap = cap1;
+const labelChip = l => badge(l === "measured" ? "measured" : (l || "sample"));
+function pieceSvg(it, dims) {
   if (it.kind === "linear") {
-    const R = Math.max(6000, it.length_mm);
-    return `<svg viewBox="-40 -40 ${R + 80} 680" role="img" aria-label="${num(it.length_mm)} mm bar drawn to scale against a 6 m length" preserveAspectRatio="xMidYMid meet">
+    const R = Math.max(6000, it.length_mm), u = R / 40;
+    return `<svg viewBox="-40 ${dims ? 60 : 170} ${R + 80} ${dims ? 380 : 260}" role="img" aria-label="${num(it.length_mm)} mm bar drawn to scale against a 6 m length" preserveAspectRatio="xMidYMid meet">
       <rect x="0" y="230" width="${R}" height="140" rx="20" style="fill:none;stroke:var(--mut);stroke-width:8;stroke-dasharray:40 30"/>
-      <rect x="0" y="230" width="${it.length_mm}" height="140" rx="20" style="fill:var(--piece);stroke:var(--np);stroke-width:12"/></svg>`;
+      <rect x="0" y="230" width="${it.length_mm}" height="140" rx="20" style="fill:var(--piece);stroke:var(--np);stroke-width:12"/>
+      ${dims ? `<g style="stroke:var(--mut);stroke-width:${u * 0.12}"><line x1="0" y1="190" x2="${it.length_mm}" y2="190"/><line x1="0" y1="${190 - u * 0.45}" x2="0" y2="${190 + u * 0.45}"/><line x1="${it.length_mm}" y1="${190 - u * 0.45}" x2="${it.length_mm}" y2="${190 + u * 0.45}"/></g><text x="${it.length_mm / 2}" y="${190 - u * 0.6}" text-anchor="middle" style="font:500 ${u * 1.15}px var(--mono);fill:var(--mut)">${num(it.length_mm)} mm</text>` : ""}</svg>`;
   }
-  const RL = Math.max(2500, it.length_mm), RW = Math.max(1250, it.width_mm), sw = RL / 300;
-  return `<svg viewBox="${-sw * 4} ${-sw * 4} ${RL + sw * 8} ${RW + sw * 8}" role="img" aria-label="${num(it.length_mm)} by ${num(it.width_mm)} mm piece drawn to scale against a 2500 by 1250 mm sheet${(it.defects || []).length ? ", defects in red" : ""}" preserveAspectRatio="xMidYMid meet">
+  const RL = Math.max(2500, it.length_mm), RW = Math.max(1250, it.width_mm), sw = RL / 300, u = RL / 42;
+  const pad = dims ? u * 4.2 : sw * 4;
+  return `<svg viewBox="${-pad} ${-pad} ${RL + pad + sw * 4} ${RW + pad + sw * 4}" role="img" aria-label="${num(it.length_mm)} by ${num(it.width_mm)} mm piece drawn to scale against a 2,500 by 1,250 mm sheet${(it.defects || []).length ? ", defects in red" : ""}" preserveAspectRatio="xMidYMid meet">
     <rect x="0" y="0" width="${RL}" height="${RW}" style="fill:none;stroke:var(--mut);stroke-width:${sw};stroke-dasharray:${sw * 5} ${sw * 4}"/>
-    <rect x="0" y="0" width="${it.length_mm}" height="${it.width_mm}" style="fill:var(--piece);stroke:var(--np);stroke-width:${sw * 1.6}"/>
-    ${(it.defects || []).map(d => `<rect x="${d.x_mm}" y="${d.y_mm}" width="${d.length_mm}" height="${d.width_mm}" style="fill:var(--bad);opacity:.55"><title>${esc(d.note || "defect")}</title></rect>`).join("")}</svg>`;
+    <rect x="0" y="0" width="${it.length_mm}" height="${it.width_mm}" rx="${sw}" style="fill:var(--piece);stroke:var(--np);stroke-width:${sw * 1.6}"/>
+    ${(it.defects || []).map(d => `<rect x="${d.x_mm}" y="${d.y_mm}" width="${d.length_mm}" height="${d.width_mm}" style="fill:var(--bad);opacity:.55"><title>${esc(d.note || "defect")}</title></rect>`).join("")}
+    ${dims ? dimLines(it.length_mm, it.width_mm, u) : ""}</svg>`;
 }
-function priceSrc(o, what) {
-  return `${what} ₹${num(Math.abs(o.price_per_kg), 1)}/kg · ${esc(cap(o.label))} · ${o.quoted_on ? "quoted " + esc(o.quoted_on) : "no date"}`;
+function itemTitle(it) {
+  if (it.kind === "perishable") return it.product;
+  if (it.kind === "linear") return `${cap1(it.profile)}, ${num(it.length_mm)} mm`;
+  return `${it.material_name} ${it.is_full_sheet ? "sheet" : "offcut"}, ${num(it.length_mm)} × ${num(it.width_mm)} × ${num(it.thickness_mm, it.thickness_mm % 1 ? 1 : 0)} mm`;
 }
-function listingCard(it, lane) {
-  const durable = lane === "durable", flat = it.kind === "flat";
-  let title, spec, media, price;
-  if (it.kind === "perishable") {
-    const h = it.hours_left, urgent = h < 12;
-    title = esc(it.product);
-    spec = `${num(it.quantity_kg, 1)} kg · ${esc(it.storage)} · ${esc(it.category.replace(/_/g, " "))}`;
-    media = `<div class="lclock"><div class="ctrl"><span class="lbl">Use-by</span><div class="grow"></div><b class="${urgent ? "bad" : ""}">${num(h, h % 1 ? 1 : 0)} h left</b></div>
-      <div class="bar ${urgent ? "bad" : "pe"}" role="img" aria-label="${num(h)} hours left of a 72 hour scale"><i style="width:${Math.max(3, Math.min(1, h / 72) * 100)}%"></i></div>
-      <span class="note">${urgent ? "Under 12 hours: collect today." : "Scale: 72 hours."}</span></div>`;
-    price = it.disposal ? `<div class="lprice"><b>${inr(-it.disposal.value)}</b><span>Disposal cost the seller avoids</span></div><p class="note">${priceSrc(it.disposal, "Disposal")}</p>`
-      : `<div class="lprice"><b>–</b><span>No disposal cost entered yet</span></div>`;
-  } else {
-    title = flat ? `${num(it.length_mm)} × ${num(it.width_mm)} mm` : `${esc(it.profile)}, ${num(it.length_mm)} mm`;
-    spec = flat ? `${num(it.thickness_mm, it.thickness_mm % 1 ? 1 : 0)} mm ${esc(it.material_name)} · ${esc(it.grade)} · ${esc(it.condition.replace(/_/g, " "))} · ${it.is_full_sheet ? "full sheet" : "offcut"}`
-      : `${esc(it.material_name)} · ${esc(it.grade)} · ${esc(it.condition.replace(/_/g, " "))}`;
-    media = `<div class="lsvg">${pieceSvg(it)}</div><span class="note lcap">To scale against a ${flat ? "2,500 × 1,250 mm sheet" : "6 m length"} (dashed)${(it.defects || []).length ? "; red = defect" : ""}</span>`;
-    if (it.floor) {
-      const c = it.ceiling;
-      price = `<div class="lprice"><b>${inr(it.floor.value)}${c ? ` – ${inr(c.value)}` : ""}</b><span>Price range for the whole ${flat ? "piece" : "length"}</span></div>
-        <p class="note">Floor: scrap value, ${priceSrc(it.floor, "scrap")}.<br>${c ? `Ceiling: same ${flat ? "steel from new sheet" : "material from new stock"} at the buyer's new price ₹${num(c.price_per_kg, 1)}/kg · ${esc(cap(c.label))}.` : "No ceiling: no buyer in this cluster has a new price for this material."}</p>`;
-    } else price = `<div class="lprice"><b>–</b><span>No price yet</span></div><p class="note">Imported stock has no scrap quote yet. A dated quote is needed before a price is shown.</p>`;
-  }
-  const il = it.illustrative, credit = il ? `Illustrative photo: ${il.shows}. "${il.title}" by ${il.author}, ${il.licence}, via Wikimedia Commons` : "";
-  const photo = it.photo ? `<figure class="lphoto"><img src="${esc(it.photo)}" alt="Photo of ${esc(it.id)} uploaded by the seller" loading="lazy"><figcaption class="ptag seller">Photo uploaded by the seller</figcaption></figure>`
-    : il ? `<figure class="lphoto illus" title="${esc(credit)}"><img src="${esc(il.url)}" alt="${esc(credit)}" loading="lazy"><figcaption class="ptag">Illustrative photo, not the actual item · <a href="${esc(il.source_url)}" target="_blank" rel="noopener" title="${esc(credit)}">Credit</a></figcaption></figure>` : "";
-  const dist = it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km`;
-  const uid = `${it.key}:${it.id}`;
-  return `<article class="lcard ${durable ? "np" : "pe"}" aria-label="${esc(it.id)}">${photo}<div class="lmedia">${media}</div>
-    <div class="lbody"><div class="ltop"><h3>${title}</h3>${labelChip(it.label)}</div><p class="mut">${spec}</p>
-      <dl class="lfacts"><dt>Seller</dt><dd>${esc(it.seller_name)}</dd><dt>Distance</dt><dd>${dist}</dd><dt>Weight</dt><dd>${num(it.kg, 1)} kg</dd><dt>Item</dt><dd><code>${esc(it.id)}</code></dd></dl>
-      ${price}
-      ${it.rules ? `<p class="note">${esc(it.source || "Imported from a CSV export")}. ${it.rules.includes("Listed by the seller") ? "Listed by the seller; no surplus rule caught it." : `Found as surplus: ${it.rules.map(esc).join("; ")}.`}</p>` : ""}
-      <div class="lact"><button class="btn pri sm" type="button" data-order="${esc(uid)}" ${it.order ? "" : "disabled"}>Order parts from this</button><a class="btn sm" href="${esc(it.passport)}" target="_blank" rel="noopener">Passport</a><button class="btn sm" type="button" data-become="${esc(uid)}" aria-expanded="false">What can this become?</button></div>
-      <div class="become" id="bc-${esc(uid.replace(/[^\w-]/g, "_"))}" hidden></div>
-      ${it.order ? `<p class="note">Opens ${esc(it.order.buyer_name)}'s order with only ${esc(it.seller_name)} ticked.</p>` : `<p class="note lwhy">Cannot order yet: ${esc(it.order_reason)}</p>`}</div></article>`;
+function specChips(it) {
+  const xs = it.kind === "perishable" ? [`${num(it.quantity_kg, 1)} kg`, words(it.storage), words(it.category)] : [it.grade, words(it.condition), `${num(it.kg, 1)} kg`];
+  return `<div class="specchips">${xs.map(x => `<span>${esc(x)}</span>`).join("")}</div>`;
+}
+function priceLine(it) {
+  if (it.kind === "perishable") return it.disposal ? `<div class="price"><b>${inr(-it.disposal.value)}</b><span>Disposal cost the seller avoids · ₹${num(Math.abs(it.disposal.price_per_kg), 1)}/kg, ${esc(it.disposal.label)}</span></div>` : `<div class="price"><b>–</b><span>No disposal cost entered yet</span></div>`;
+  if (!it.floor) return `<div class="price"><b>–</b><span>No price yet: needs a dated scrap quote</span></div>`;
+  const c = it.ceiling, src = `Lowest: scrap value at ₹${num(it.floor.price_per_kg, 1)}/kg (${it.floor.label}, ${it.floor.quoted_on ? "quoted " + it.floor.quoted_on : "no date"}). ${c ? `Highest: the same material bought new at ₹${num(c.price_per_kg, 1)}/kg (${c.label}).` : "No highest price: no buyer here pays a new price for this material."}`;
+  return `<div class="price" title="${esc(src)}"><b>${inr(it.floor.value)}${c ? ` – ${inr(c.value)}` : ""}</b><span>From its scrap value to the cost of new ${it.kind === "flat" ? "sheet" : "stock"}</span></div>`;
+}
+function freshBar(h) {
+  const cls = h < 12 ? "bad" : h < 24 ? "amber" : "good", barCls = h < 12 ? "bad" : h < 24 ? "amber" : "pe";
+  return `<div class="fresh"><div class="row"><span class="lbl">Freshness</span><b class="${cls}">${num(h, h % 1 ? 1 : 0)} h left</b></div><div class="bar ${barCls}" role="img" aria-label="${num(h)} hours of shelf life left"><i style="width:${Math.max(3, Math.min(1, h / 72) * 100)}%"></i></div></div>`;
+}
+function itemMedia(it) {
+  const p = photoHtml(it);
+  if (p) return p;
+  if (it.kind === "perishable") return `<div class="media blank">${ic("leaf")}</div>`;
+  return `<div class="media draw">${pieceSvg(it)}</div>`;
+}
+function productCard(it, lane) {
+  const uid = `${it.key}:${it.id}`, dist = it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km away`;
+  return `<article class="pcard" tabindex="0" data-open="${esc(uid)}" aria-label="${esc(itemTitle(it))}">${itemMedia(it)}
+    <div class="pbody"><div class="ptitle"><h3>${esc(itemTitle(it))}</h3>${labelChip(it.label)}</div>
+      ${specChips(it)}${it.kind === "perishable" ? freshBar(it.hours_left) : ""}${priceLine(it)}
+      <div class="who"><span title="${esc(it.seller_name)}">${ic("building-2", "sm")}${esc(short(it.seller_name))}</span><span>${ic("map-pin", "sm")}${dist}</span></div>
+      <div class="pact"><button class="btn np" type="button" data-order="${esc(uid)}" ${it.order ? "" : "disabled"}>${lane === "fresh" ? "Order from this" : "Order parts from this"}</button><button class="btn" type="button" data-become="${esc(uid)}">What can this become?</button></div>
+      ${it.order ? "" : `<p class="why">${ic("info", "sm")}<span>${esc(it.order_reason)}</span></p>`}</div></article>`;
+}
+async function openItem(it, focusBecome) {
+  const lane = it.kind === "perishable" ? "fresh" : "durable", url = location.origin + it.passport;
+  const specs = it.kind === "perishable"
+    ? [["Product", it.product], ["Category", words(it.category)], ["Quantity", `${num(it.quantity_kg, 1)} kg`], ["Storage", words(it.storage)], ["Shelf life left", `${num(it.hours_left, 1)} hours`]]
+    : it.kind === "flat" ? [["Material", `${it.material_name}, ${it.grade}`], ["Size", `${num(it.length_mm)} × ${num(it.width_mm)} mm`], ["Thickness", `${num(it.thickness_mm, it.thickness_mm % 1 ? 1 : 0)} mm`], ["Condition", words(it.condition)], ["Weight", `${num(it.kg, 1)} kg`]]
+    : [["Profile", cap1(it.profile)], ["Length", `${num(it.length_mm)} mm`], ["Material", `${it.material_name}, ${it.grade}`], ["Condition", words(it.condition)], ["Weight", `${num(it.kg, 1)} kg`]];
+  specs.push(["Seller", it.seller_name], ["Distance", it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km`], ["Item", it.id]);
+  const d = drawer.open(esc(itemTitle(it)), `${photoHtml(it)}
+    <div class="ctrl">${labelChip(it.label)}${it.rules ? `<span class="pill p-mut" title="${esc(it.rules.join("; "))}">${esc(it.source || "Imported")}</span>` : ""}</div>
+    ${priceLine(it)}${it.kind === "perishable" ? freshBar(it.hours_left) : ""}
+    <dl class="specs">${specs.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
+    ${it.kind !== "perishable" ? `<div><h4>Drawn to scale</h4><div class="media draw" style="aspect-ratio:auto">${pieceSvg(it, true)}</div><p class="note">Against a ${it.kind === "flat" ? "2,500 × 1,250 mm sheet" : "6 m length"} (dashed)${(it.defects || []).length ? "; red marks a defect the cutting plan avoids" : ""}.</p></div>` : ""}
+    <div class="pact"><button class="btn np lg" type="button" id="dOrder" ${it.order ? "" : "disabled"}>${lane === "fresh" ? "Order from this" : "Order parts from this"}</button></div>
+    ${it.order ? `<p class="note">Opens ${esc(short(it.order.buyer_name))}'s order with only this seller selected.</p>` : `<p class="why">${ic("info", "sm")}<span>${esc(it.order_reason)}</span></p>`}
+    <div id="dBecome"><h3>What can this become?</h3><div class="skel" style="height:96px"></div></div>
+    <div><h4>Passport</h4><div class="qrbox"><img alt="QR code for the passport of ${esc(it.id)}" src="/api/qr.svg?data=${encodeURIComponent(url)}"><div class="note">Scan to open this item's passport, or <a href="${esc(it.passport)}" target="_blank" rel="noopener">open it here ${ic("external-link", "sm")}</a>.</div></div></div>`);
+  $("#dOrder", d).onclick = () => { drawer.close(); orderFrom(it); };
+  if (focusBecome) $("#dBecome", d).scrollIntoView({block: "start"});
+  const box = $("#dBecome", d);
+  try { box.innerHTML = `<h3>What can this become?</h3>${becomeHtml(await api(`/api/become/${encodeURIComponent(it.key)}/${encodeURIComponent(it.id)}`), 3)}`; }
+  catch (x) { box.innerHTML = `<h3>What can this become?</h3>${errBox(x)}`; }
+}
+async function orderFrom(it) {
+  const k = it.order.scenario, S = await scen(k), lane = it.kind === "perishable" ? "fresh" : "durable";
+  st.scen[lane] = k; st.ordId[k] = it.order.demand_id;
+  st.off[k] = new Set(S.data.sellers.map(x => x.id).filter(id => id !== (it.match_seller || it.seller_id)));
+  go({view: "match"});
 }
 async function vBrowse(el) {
   const lane = st.lane, F = st.br[lane], durable = lane === "durable";
   const r = await api(`/api/browse/${lane}`);
   const items = r.items, byUid = Object.fromEntries(items.map(it => [`${it.key}:${it.id}`, it]));
-  const matOf = it => durable ? it.material_name : it.category.replace(/_/g, " ");
+  const matOf = it => durable ? it.material_name : words(it.category);
   const uniq = xs => [...new Set(xs)].sort((a, b) => typeof a === "number" ? a - b : String(a).localeCompare(String(b)));
-  const mats = uniq(items.map(matOf)), thicks = uniq(items.filter(it => it.kind === "flat").map(it => it.thickness_mm)), sellers = uniq(items.map(it => it.seller_name));
-  const sorts = durable ? [["distance", "Distance, nearest first"], ["size", "Size, largest first"]] : [["hours", "Hours left, soonest first"], ["distance", "Distance, nearest first"]];
-  const sel = (id, label, cur, opts, all) => `<label class="field">${label}<select id="${id}"><option value="">${all}</option>${opts.map(o => `<option value="${esc(o)}" ${String(o) === String(cur) ? "selected" : ""}>${esc(o)}</option>`).join("")}</select></label>`;
-  el.innerHTML = `<div class="card noprint"><div class="ctrl"><label class="field lsearch">Search<input id="brQ" type="search" placeholder="Item, seller, grade, product" value="${esc(F.q)}"></label>
-      ${sel("brMat", durable ? "Material" : "Category", F.mat, mats, durable ? "All materials" : "All categories")}
-      ${durable ? sel("brThick", "Thickness mm", F.thick, thicks, "Any thickness") : ""}
-      ${sel("brSeller", "Seller", F.seller, sellers, "All sellers")}
-      <label class="field">Sort by<select id="brSort">${sorts.map(([k, t]) => `<option value="${k}" ${k === F.sort ? "selected" : ""}>${t}</option>`).join("")}</select></label>
-      <div class="grow"></div><button class="btn" id="brClear" type="button">Clear filters</button></div>
-    <p class="note">Distances are straight-line km from the buyer of the first open order in each sample cluster (${Object.entries(r.distance_from).map(([k, b]) => esc(b)).join(", ")}). Prices and positions are sample data.${durable ? "" : " Food rules are platform rules that still need expert review."}</p></div>
-    <div class="ctrl"><span id="brCount" class="mut" aria-live="polite"></span></div><div id="brGrid" class="lgrid"></div>`;
+  const mats = uniq(items.map(matOf)), thicks = uniq(items.filter(it => it.kind === "flat").map(it => it.thickness_mm)), sellers = uniq(items.map(it => short(it.seller_name)));
+  const sorts = durable ? [["distance", "Nearest first"], ["size", "Largest first"], ["price", "Lowest price first"]] : [["hours", "Soonest use-by first"], ["distance", "Nearest first"]];
+  const fchip = (id, cur, all, opts) => `<span class="fchip ${cur ? "on" : ""}"><select id="${id}" aria-label="${esc(all)}"><option value="">${esc(all)}</option>${opts.map(([v, t]) => `<option value="${esc(v)}" ${String(v) === String(cur) ? "selected" : ""}>${esc(t)}</option>`).join("")}</select></span>`;
+  el.innerHTML = `<div class="searchbar" role="search">${ic("search")}<input id="brQ" type="search" placeholder="${durable ? "Search steel, aluminium, plywood, a grade or a seller" : "Search tomatoes, paneer, bread or a seller"}" value="${esc(F.q)}" aria-label="Search surplus"></div>
+    <div class="filters">${fchip("brMat", F.mat, durable ? "All materials" : "All categories", mats.map(m => [m, m]))}
+      ${durable ? fchip("brThick", F.thick, "Any thickness", thicks.map(t => [t, `${num(t, t % 1 ? 1 : 0)} mm`])) : ""}
+      ${fchip("brSeller", F.seller, "All sellers", sellers.map(s => [s, s]))}
+      ${fchip("brDist", F.dist, "Any distance", [["2", "Within 2 km"], ["3", "Within 3 km"], ["5", "Within 5 km"]])}
+      <div class="grow"></div><span class="lbl">Sort</span><span class="fchip"><select id="brSort" aria-label="Sort">${sorts.map(([k, t]) => `<option value="${k}" ${k === F.sort ? "selected" : ""}>${t}</option>`).join("")}</select></span></div>
+    <div class="ctrl"><span id="brCount" class="count" aria-live="polite"></span><button class="btn sm ghost" id="brClear" type="button">Clear filters</button><div class="grow"></div><span class="note">Distances are straight-line km on the demo map. ${durable ? "" : "Food rules are platform rules that still need expert review."}</span></div>
+    <div id="brGrid" class="pgrid"></div>`;
   const grid = $("#brGrid", el), count = $("#brCount", el);
   function paint() {
     const q = F.q.trim().toLowerCase();
-    let xs = items.filter(it => (!F.mat || matOf(it) === F.mat) && (!F.thick || (it.kind === "flat" && String(it.thickness_mm) === String(F.thick))) && (!F.seller || it.seller_name === F.seller)
+    let xs = items.filter(it => (!F.mat || matOf(it) === F.mat) && (!F.thick || (it.kind === "flat" && String(it.thickness_mm) === String(F.thick))) && (!F.seller || short(it.seller_name) === F.seller)
+      && (!F.dist || (it.distance_km != null && it.distance_km <= +F.dist))
       && (!q || [it.id, it.seller_name, it.grade, it.product, it.material_name, it.profile, it.category, it.condition].some(v => v && String(v).toLowerCase().includes(q))));
     const far = v => v == null ? Infinity : v;
     if (F.sort === "distance") xs.sort((a, b) => far(a.distance_km) - far(b.distance_km));
     else if (F.sort === "size") xs.sort((a, b) => (b.length_mm * (b.width_mm || 1)) - (a.length_mm * (a.width_mm || 1)));
+    else if (F.sort === "price") xs.sort((a, b) => far(a.floor && a.floor.value) - far(b.floor && b.floor.value));
     else xs.sort((a, b) => a.hours_left - b.hours_left);
-    count.textContent = `Showing ${xs.length} of ${items.length} ${durable ? "pieces" : "lots"}`;
-    grid.innerHTML = !items.length ? `<div class="empty">Nothing is on offer in this lane yet. Sellers add stock under Connect your system.</div>`
-      : xs.length ? xs.map(it => listingCard(it, lane)).join("") : `<div class="empty">No ${durable ? "pieces" : "lots"} match these filters. <button class="btn sm" type="button" id="brClear2">Clear filters</button></div>`;
+    count.textContent = `${xs.length} of ${items.length} ${durable ? "pieces" : "lots"}`;
+    grid.innerHTML = !items.length ? emptyState("inbox", "Nothing is on offer in this lane yet. Sellers add stock under Connect your system.")
+      : xs.length ? xs.map(it => productCard(it, lane)).join("") : emptyState("search", `No ${durable ? "pieces" : "lots"} match these filters.`, `<button class="btn" type="button" id="brClear2">Clear filters</button>`);
     const c2 = $("#brClear2", grid); if (c2) c2.onclick = clear;
   }
-  function clear() { Object.assign(F, {q: "", mat: "", thick: "", seller: ""}); render(); }
+  function clear() { Object.assign(F, {q: "", mat: "", thick: "", seller: "", dist: ""}); render(); }
   $("#brQ", el).oninput = e => { F.q = e.target.value; paint(); };
-  for (const [id, k] of [["brMat", "mat"], ["brThick", "thick"], ["brSeller", "seller"], ["brSort", "sort"]]) { const s = $("#" + id, el); if (s) s.onchange = () => { F[k] = s.value; paint(); }; }
+  for (const [id, k] of [["brMat", "mat"], ["brThick", "thick"], ["brSeller", "seller"], ["brDist", "dist"], ["brSort", "sort"]]) {
+    const s = $("#" + id, el); if (s) s.onchange = () => { F[k] = s.value; s.parentElement.classList.toggle("on", !!s.value && k !== "sort"); paint(); };
+  }
   $("#brClear", el).onclick = clear;
-  grid.addEventListener("click", async e => {
-    const bb = e.target.closest("[data-become]");
-    if (bb) {
-      const it = byUid[bb.dataset.become], box = document.getElementById("bc-" + bb.dataset.become.replace(/[^\w-]/g, "_"));
-      const open = bb.getAttribute("aria-expanded") === "true";
-      bb.setAttribute("aria-expanded", String(!open)); box.hidden = open;
-      if (!open && !box.dataset.done) {
-        box.innerHTML = `<p class="note">Trying every order and common part…</p>`;
-        try { box.innerHTML = becomeHtml(await api(`/api/become/${encodeURIComponent(it.key)}/${encodeURIComponent(it.id)}`), 3); box.dataset.done = "1"; }
-        catch (x) { box.innerHTML = `<p class="err">${esc(x.message)}</p>`; }
-      }
-      return;
-    }
-    const b = e.target.closest("[data-order]");
-    if (!b) return;
-    const it = byUid[b.dataset.order], k = it.order.scenario, S = await scen(k);
-    st.scen[lane] = k; st.ordId[k] = it.order.demand_id;
-    st.off[k] = new Set(S.data.sellers.map(x => x.id).filter(id => id !== (it.match_seller || it.seller_id)));
-    go({view: "match"});
+  grid.addEventListener("click", e => {
+    if (e.target.closest("a")) return;
+    const bo = e.target.closest("[data-order]"), bb = e.target.closest("[data-become]"), card = e.target.closest("[data-open]");
+    if (bo) return orderFrom(byUid[bo.dataset.order]);
+    if (bb) return openItem(byUid[bb.dataset.become], true);
+    if (card) openItem(byUid[card.dataset.open]);
   });
+  grid.addEventListener("keydown", e => { const card = e.target.closest("[data-open]"); if (card && e.target === card && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openItem(byUid[card.dataset.open]); } });
   paint();
 }
 
@@ -403,37 +517,53 @@ async function vMatch(el) {
   const sellerName = id => (D.sellers.find(s => s.id === id) || {}).name || id;
   let f, err;
   try { f = await api("/api/fulfil", {demand_id: d.id, data, seller_ids: sellerIds, allow_partial: true}); } catch (e) { err = e; }
+  const optLabel = x => `${orderName(x)} · ${fresh ? num(x.quantity, 0) + " kg" : num(x.quantity) + " parts"} · ${x.id}${x.status === "matched" ? " · matched" : ""}`;
+  const ticked = D.sellers.filter(s => !off.has(s.id)).length;
   const ctrl = `<div class="card noprint"><div class="ctrl">${await scenSeg()}
-    <label class="field">Order<select id="ordSel">${posted.length ? `<optgroup label="Your requirements">${posted.map(x => `<option value="${esc(x.id)}" ${x.id === d.id ? "selected" : ""}>${esc(x.id)} · ${esc(x.buyer_name)}: ${num(x.quantity, fresh ? 1 : 0)} ${esc(x.part_name)}${x.status === "matched" ? " (matched)" : ""}</option>`).join("")}</optgroup><optgroup label="Sample orders">` : ""}${S.data.demands.map(x => `<option value="${esc(x.id)}" ${x.id === d.id ? "selected" : ""}>${esc(x.buyer_name)}: ${num(x.quantity, fresh ? 1 : 0)} ${esc(x.part_name)}</option>`).join("")}${posted.length ? "</optgroup>" : ""}</select></label>
-    <label class="field">Transport rate ×<input id="rate" type="number" min="0.2" max="5" step="0.1" value="${rate}"></label></div>
-    <div class="ctrl"><span class="lbl">Sellers in the cluster</span>${D.sellers.map(s => `<label class="check"><input type="checkbox" data-seller="${esc(s.id)}" ${off.has(s.id) ? "" : "checked"}>${esc(s.name)}</label>`).join("")}</div></div>`;
+      <label class="field grow">Order<select id="ordSel">${posted.length ? `<optgroup label="Your requirements">${posted.map(x => `<option value="${esc(x.id)}" ${x.id === d.id ? "selected" : ""}>${esc(optLabel(x))}</option>`).join("")}</optgroup><optgroup label="Sample orders">` : ""}${S.data.demands.map(x => `<option value="${esc(x.id)}" ${x.id === d.id ? "selected" : ""}>${esc(optLabel(x))}</option>`).join("")}${posted.length ? "</optgroup>" : ""}</select></label></div>
+    ${fold(`Sellers and transport: ${ticked} of ${D.sellers.length} sellers`, `<div class="ctrl">${D.sellers.map(s => `<label class="check"><input type="checkbox" data-seller="${esc(s.id)}" ${off.has(s.id) ? "" : "checked"}>${esc(short(s.name))}</label>`).join("")}</div>
+      <label class="field">Transport rate ×<input id="rate" type="number" min="0.2" max="5" step="0.1" value="${rate}"></label>`, false, "fSellers")}</div>`;
   if (err) { el.innerHTML = ctrl + errBox(err); bind(); return; }
   const b = f.best;
   let h = ctrl;
-  if (!b) h += `<div class="card"><h2>No match</h2><p>${esc(f.message)}</p>${rejList(f)}</div>`;
+  if (!b) h += `<div class="card">${emptyState("circle-x", `No seller can supply ${esc(orderName(d))} right now. ${esc(f.message)}`)}${fold(`Why each piece was refused (${f.rejections.length})`, rejList(f))}</div>`;
   else {
-    const v = b.value, kgCol = f.unit_name !== "kg";
-    h += `<div class="card"><div class="ctrl"><h2>${esc(d.buyer_name)} needs ${num(d.quantity, fresh ? 1 : 0)} ${esc(d.part_name)}</h2>${f.feasible ? '<span class="pill p-ok">Fully matched</span>' : `<span class="pill p-warn">Short by ${num(f.shortfall, 1)}</span>`}${v.is_donation ? '<span class="pill p-mut">Donation</span>' : ""}</div>
-      <p class="mut">${esc(f.message)}</p>
-      <div class="fig"><div><b>${inr(v.buyer_value_W)}</b><span>${fresh ? "Worth to the buyer" : "Same parts from new sheet"}</span></div><div><b>${inr(v.salvage_value_S)}</b><span>${fresh ? "Seller's disposal alternative" : "Sold as scrap"}</span></div><div><b>${inr(v.transport_T)}</b><span>Transport</span></div><div class="g"><b>${inr(v.gain_G)}</b><span>Value created</span></div><div><b>${inr(v.buyer_saving)}</b><span>Buyer saves</span></div></div>
-      ${split(v)}
-      <p class="note">${esc(b.vehicle)} · ${num(b.route_km, 2)} km round trip · ${b.trips} ${b.trips === 1 ? "trip" : "trips"} · pickup ${b.pickup_order.map(esc).join(" → ")} · without this the stock would be ${esc(b.counterfactual.join(", "))}. Prices are sample data.</p>
-      <div class="ctrl noprint"><button class="btn pri" id="accept" type="button">Accept this order</button><span id="acceptMsg" class="note" aria-live="polite"></span></div></div>`;
-    h += `<div class="cols"><div class="card"><h2>Who supplies it</h2><div class="scroll"><table><tr><th>Seller</th><th class="n">${esc(f.unit_name)}</th>${kgCol ? '<th class="n">kg</th>' : ""}<th class="n">Alternative</th><th class="n">Gain</th></tr>${b.per_seller.map(p => `<tr><td>${esc(p.seller_name)}</td><td class="n">${num(p.units, fresh ? 1 : 0)}</td>${kgCol ? `<td class="n">${num(p.kg_shipped, 1)}</td>` : ""}<td class="n">${inr(p.salvage_value)}</td><td class="n">${inr(p.gain_above_salvage)}</td></tr>`).join("")}</table></div>
-      <h4>What every seller could supply</h4>${f.seller_capacity.map(c => `<div class="orow"><div>${esc(c.seller_name)}<div class="note">${num(c.distance_km, 1)} km away</div></div><div class="bar ${fresh ? "pe" : ""}"><i style="width:${Math.min(100, c.capacity / Math.max(1, ...f.seller_capacity.map(z => z.capacity)) * 100)}%"></i></div><div class="v">${num(c.capacity, fresh ? 1 : 0)}</div></div>`).join("")}</div>
-      <div class="card">${rejList(f)}<h4>Other combinations the engine tried</h4><div class="scroll"><table><tr><th>Sellers</th><th class="n">Value created</th><th class="n">km</th></tr>${f.alternatives.map(a => `<tr><td>${a.sellers_used.map(esc).join(" + ")}</td><td class="n">${inr(a.value.gain_G)}</td><td class="n">${num(a.route_km, 2)}</td></tr>`).join("") || '<tr><td colspan="3" class="mut">None</td></tr>'}</table></div></div></div>`;
+    const v = b.value, n = b.sellers_used.length, unit = fresh ? "kg" : f.unit_name;
+    const what = `${num(b.units, fresh ? 1 : 0)} ${unit} from ${n} seller${n === 1 ? "" : "s"}, ${num(b.route_km, 1)} km pickup by ${esc(b.vehicle || "vehicle")}${b.trips > 1 ? ` (${b.trips} trips)` : ""}.`;
+    h += `<div class="card"><div class="hero">
+        <div class="stack" style="gap:12px"><div class="ctrl">${f.feasible ? `<span class="pill p-ok">${ic("circle-check", "sm")}Fully matched</span>` : `<span class="pill p-warn">${ic("triangle-alert", "sm")}Short by ${num(f.shortfall, 1)} ${esc(unit)}</span>`}${v.is_donation ? `<span class="pill p-pe">Donation</span>` : ""}${badge("sample")}</div>
+          <h2>${esc(orderName(d))} ${codeTag(d.id)}</h2>
+          <p class="hero-sub">${what}</p>
+          ${v.is_donation ? `<div><div class="hero-num">${inr(-v.salvage_value_S)}</div><p class="hero-sub">disposal cost avoided, for ${inr(v.transport_T)} transport</p></div>`
+            : `<div><div class="hero-num acc">${inr(v.gain_G)}</div><p class="hero-sub">value created, compared with selling it as scrap</p></div>`}
+          <div class="actions noprint"><button class="btn pri lg" id="accept" type="button">${ic("circle-check")}Accept this order</button><span class="note">A demo deal: it is recorded as simulated and no real order is placed.</span></div></div>
+        <div class="stack" style="gap:var(--s2)">${v.is_donation ? "" : `<h4>Where the buyer's money goes</h4>${ladder({scrap: v.salvage_value_S, transport: v.transport_T, gain: v.gain_G, scrapLabel: fresh ? "Disposal value" : "Scrap value"})}
+          <p class="note">The buyer would pay ${inr(v.buyer_value_W)} for the same ${fresh ? "food from the usual supplier" : "parts cut from new sheet"}. Prices are sample data.</p>`}</div></div></div>`;
+    const capOf = id => f.seller_capacity.find(c => c.seller_id === id) || {};
+    h += `<div class="stack" style="gap:12px"><h2>Who supplies it</h2><div class="pgrid" style="grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr))">${b.per_seller.map(p => `<div class="card" style="gap:12px">
+        <div class="ctrl" style="gap:10px">${ic("building-2", "lg")}<div><b>${esc(short(p.seller_name))}</b><div class="note">${esc(p.seller_name.split(", ")[1] || "")}</div></div></div>
+        <div class="statrow tight"><div class="stat"><b>${num(p.units, fresh ? 1 : 0)}</b><span>${esc(unit)}</span></div><div class="stat"><b>${num(p.kg_shipped, 1)}</b><span>kg collected</span></div><div class="stat"><b>${num(capOf(p.seller_id).distance_km, 1)}</b><span>km away</span></div></div></div>`).join("")}</div></div>`;
     const sheets = b.allocations.filter(a => a.shape === "sheet" && a.parts && a.parts.length);
-    if (sheets.length) h += `<div class="card"><h2>Cutting floor</h2><p class="mut">Grey is the seller's piece, drawn to scale; red marks a defect the engine cut around. Yellow shapes are the buyer's parts, placed with ${num(S.data.settings.kerf_mm, 1)} mm kerf and ${num(S.data.settings.edge_margin_mm)} mm edge margin.</p><div class="sheets">${sheets.slice(0, 12).map(sheetSvg).join("")}</div>${sheets.length > 12 ? `<p class="note">Showing 12 of ${sheets.length} pieces used.</p>` : ""}</div>`;
-    else if (fresh) h += `<div class="card"><h2>Lots taken</h2><div class="scroll"><table><tr><th>Lot</th><th class="n">Taken kg</th><th class="n">Lot kg</th><th class="n">Hours left</th><th>Storage</th></tr>${b.allocations.map(a => `<tr><td>${esc(a.resource_id)}</td><td class="n">${num(a.taken_kg, 1)}</td><td class="n">${num(a.quantity_kg, 1)}</td><td class="n">${num(a.hours_left)}</td><td>${esc(a.storage)}</td></tr>`).join("")}</table></div><p class="note">Food rules are platform rules and still need expert review.</p></div>`;
+    if (sheets.length) h += `<div class="card"><div class="section-title"><h2>Cutting plans</h2><span class="mut">${sheets.length} piece${sheets.length === 1 ? "" : "s"}</span></div>
+      <p class="mut">Each grey shape is a seller's piece, drawn to scale. The yellow parts are placed with a ${num(S.data.settings.kerf_mm, 1)} mm ${term("blade gap", "kerf")} and a ${num(S.data.settings.edge_margin_mm)} mm edge strip that is never cut; red marks a defect the plan avoids.</p>
+      <div class="sheets">${sheets.slice(0, 12).map(sheetSvg).join("")}</div>${sheets.length > 12 ? `<p class="note">Showing 12 of ${sheets.length} pieces used.</p>` : ""}</div>`;
+    else if (fresh) h += `<div class="card"><h2>Lots taken</h2><div class="scroll"><table><tr><th>Lot</th><th>Seller</th><th class="n">Taken kg</th><th class="n">Hours left</th><th>Storage</th></tr>${b.allocations.map(a => `<tr><td>${esc(a.resource_id)}</td><td>${esc(short(sellerName(a.seller_id)))}</td><td class="n">${num(a.taken_kg, 1)}</td><td class="n">${num(a.hours_left)}</td><td>${esc(words(a.storage))}</td></tr>`).join("")}</table></div><p class="note">Food rules are platform rules and still need expert review.</p></div>`;
     else h += `<div class="card"><h2>Pieces used</h2><div class="scroll"><table><tr><th>Piece</th><th>Seller</th><th class="n">Cut pieces</th></tr>${b.allocations.map(a => `<tr><td>${esc(a.resource_id)}</td><td>${esc(sellerName(a.seller_id))}</td><td class="n">${num(a.units)}</td></tr>`).join("")}</table></div></div>`;
+    h += `<div class="card">${fold("Show details", `
+        <div class="statrow"><div class="stat"><b>${inr(v.buyer_saving)}</b><span>The buyer saves</span></div><div class="stat"><b>${inr(v.seller_gain_above_salvage)}</b><span>Sellers earn above ${fresh ? "disposal" : "scrap"} value</span></div></div>
+        <p class="note">Pickup order: ${b.pickup_order.map(id => esc(short(sellerName(id)))).join(" → ")}. ${term("What would happen otherwise", "counterfactual")}: the stock would be ${esc(b.counterfactual.join(", "))}. ${n > 1 ? `The order is ${term("combined from several sellers", "pooling")}.` : ""}</p>
+        <div><h4>What every seller could supply</h4>${f.seller_capacity.map(c => `<div class="orow"><div>${esc(short(c.seller_name))}<div class="note">${num(c.distance_km, 1)} km away</div></div><div class="bar ${fresh ? "pe" : ""}"><i style="width:${Math.min(100, c.capacity / Math.max(1, ...f.seller_capacity.map(z => z.capacity)) * 100)}%"></i></div><div class="v">${num(c.capacity, fresh ? 1 : 0)}</div></div>`).join("")}</div>
+        <div>${rejList(f)}</div>
+        <div><h4>Other combinations the engine tried</h4><div class="scroll"><table><tr><th>Sellers</th><th class="n">Value created</th><th class="n">km</th></tr>${f.alternatives.map(a => `<tr><td>${a.sellers_used.map(id => esc(short(sellerName(id)))).join(" + ")}</td><td class="n">${inr(a.value.gain_G)}</td><td class="n">${num(a.route_km, 1)}</td></tr>`).join("") || '<tr><td colspan="3" class="mut">None</td></tr>'}</table></div></div>`)}</div>`;
   }
   el.innerHTML = h;
   bind();
   function bind() {
     bindScen(el);
     $("#ordSel", el).onchange = e => { st.ordId[k] = e.target.value; render(); };
-    $("#rate", el).onchange = e => { const x = +e.target.value; if (x > 0) { st.rate[k] = x; render(); } };
+    const rt = $("#rate", el); if (rt) rt.onchange = e => { const x = +e.target.value; if (x > 0) { st.rate[k] = x; render(); } };
     el.querySelectorAll("[data-seller]").forEach(c => c.onchange = () => { c.checked ? off.delete(c.dataset.seller) : off.add(c.dataset.seller); render(); });
+    const fs = $("#fSellers", el); if (fs) { fs.open = !!st.sellersOpen; fs.ontoggle = () => { st.sellersOpen = fs.open; }; }
     const acc = $("#accept", el);
     if (acc) acc.onclick = async () => {
       acc.disabled = true;
@@ -443,15 +573,14 @@ async function vMatch(el) {
           route_km: b.route_km, value_above_salvage: b.value.seller_gain_above_salvage, buyer_utilisation: d.buyer_utilisation ?? null,
           scenario: k, rate_multiplier: rate, requirement_id: d.requirement_id ?? null});
         st.lastDeal = deal.id;
-        $("#acceptMsg", el).innerHTML = `Deal ${deal.id} agreed (simulated). <a href="#buyer/deals/${st.lane}" id="toDeals">Track it in My deals</a> or <a href="#buyer/pickup/${st.lane}" id="toPickup">book the pickup</a>.`;
-        $("#toDeals", el).onclick = ev => { ev.preventDefault(); go({view: "deals"}); };
-        $("#toPickup", el).onclick = ev => { ev.preventDefault(); go({view: "pickup"}); };
-      } catch (e) { $("#acceptMsg", el).innerHTML = `<span class="err">${esc(e.message)}</span>`; acc.disabled = false; }
+        toast(`Deal #${deal.id} agreed (simulated). <a href="#buyer/pickup/${st.lane}">Book the pickup</a> or <a href="#buyer/deals/${st.lane}">track it in My deals</a>.`);
+        acc.innerHTML = `${ic("circle-check")}Accepted as deal #${deal.id}`;
+      } catch (e) { toast(esc(e.message), "bad"); acc.disabled = false; }
     };
   }
 }
 function rejList(f) {
-  return `<h2>Refused by the rules (${f.rejections.length})</h2><ul class="rej">${f.rejections.map(r => `<li><code>${esc(r.resource_id)}</code> ${esc(r.reason)}</li>`).join("") || "<li>None</li>"}</ul>`;
+  return `<h4>Refused by the rules (${f.rejections.length})</h4><ul class="rej">${f.rejections.map(r => `<li><code>${esc(r.resource_id)}</code> ${esc(r.reason)}</li>`).join("") || "<li>None</li>"}</ul>`;
 }
 
 /* ---------------- Deals (buyer) and deal monitor (admin) ---------------- */
@@ -712,17 +841,19 @@ function bindManual(el, lane) {
 /* ---------------- Seller: Sold before it's cut (Gap Fill) ---------------- */
 const OCOL = ["var(--c1)", "var(--c2)", "var(--c3)", "var(--c4)", "var(--c5)", "var(--c6)"];
 function gapSvg(r, after, colours) {
-  const s = r.sheet, L = s.length_mm, W = s.width_mm, m = r.edge_margin_mm, id = after ? "ha" : "hb";
-  let g = `<defs><pattern id="${id}" patternUnits="userSpaceOnUse" width="36" height="36" patternTransform="rotate(45)"><rect width="36" height="36" style="fill:var(--bg)"/><line x1="0" y1="0" x2="0" y2="36" style="stroke:var(--scrap);stroke-width:10"/></pattern></defs>`;
-  g += `<rect x="0" y="0" width="${L}" height="${W}" style="fill:var(--piece);stroke:var(--mut);stroke-width:2" vector-effect="non-scaling-stroke"/>`;
+  const s = r.sheet, L = s.length_mm, W = s.width_mm, m = r.edge_margin_mm, id = after ? "ha" : "hb", u = L / 42;
+  let g = `<defs><pattern id="${id}" patternUnits="userSpaceOnUse" width="36" height="36" patternTransform="rotate(45)"><rect width="36" height="36" style="fill:var(--panel-2)"/><line x1="0" y1="0" x2="0" y2="36" style="stroke:var(--scrap);stroke-width:9"/></pattern></defs>`;
+  g += `<rect x="0" y="0" width="${L}" height="${W}" rx="${u * 0.2}" style="fill:var(--piece);stroke:var(--mut);stroke-width:1.5" vector-effect="non-scaling-stroke"/>`;
   g += r.free_rects.map(f => `<rect x="${f.x}" y="${f.y}" width="${f.w}" height="${f.h}" style="fill:url(#${id})"/>`).join("");
-  if (after) for (const n of r.neighbours) {
+  g += `<g class="own-g">${r.own.parts.map(p => `<rect x="${p.x}" y="${p.y}" width="${p.length}" height="${p.width}" rx="6" style="fill:var(--own);stroke:var(--ownl);stroke-width:1.5" vector-effect="non-scaling-stroke"><title>Your ${esc(r.own.part_name)}</title></rect>${p.length >= 200 && p.width >= 120 ? `<text x="${p.x + p.length / 2}" y="${p.y + p.width / 2 + 15}" text-anchor="middle" style="font:600 44px var(--disp);fill:#fff;letter-spacing:2px">YOURS</text>` : ""}`).join("")}</g>`;
+  if (after) r.neighbours.forEach((n, i) => {
     const c = colours[n.order_id];
-    g += n.parts.map(p => `<rect x="${p.x}" y="${p.y}" width="${p.length}" height="${p.width}" style="fill:${c};stroke:var(--fg);stroke-width:1" vector-effect="non-scaling-stroke"><title>${esc(n.buyer_name)}: ${esc(n.part_name)}</title></rect>${p.length >= 140 && p.width >= 90 ? `<text x="${p.x + p.length / 2}" y="${p.y + p.width / 2 + 16}" text-anchor="middle" style="font:600 46px var(--mono);fill:#10181f">${esc(n.order_id)}</text>` : ""}`).join("");
-  }
-  g += r.own.parts.map(p => `<rect x="${p.x}" y="${p.y}" width="${p.length}" height="${p.width}" style="fill:var(--own);stroke:var(--ownl);stroke-width:1.5" vector-effect="non-scaling-stroke"><title>Your ${esc(r.own.part_name)}</title></rect>${p.length >= 200 && p.width >= 120 ? `<text x="${p.x + p.length / 2}" y="${p.y + p.width / 2 + 16}" text-anchor="middle" style="font:600 46px var(--body);fill:#fff">YOURS</text>` : ""}`).join("");
+    g += `<g class="drop" style="--i:${i}">${n.parts.map(p => `<rect x="${p.x}" y="${p.y}" width="${p.length}" height="${p.width}" rx="4" style="fill:${c};stroke:rgba(16,24,31,.55);stroke-width:1" vector-effect="non-scaling-stroke"><title>${esc(orderName(n))}</title></rect>`).join("")}</g>`;
+  });
   g += `<rect x="${m}" y="${m}" width="${L - 2 * m}" height="${W - 2 * m}" style="fill:none;stroke:var(--mut);stroke-width:1;stroke-dasharray:6 6" vector-effect="non-scaling-stroke"/>`;
-  return `<svg viewBox="-10 -10 ${L + 20} ${W + 20}" role="img" aria-label="${after ? "Cutting plan with neighbours' parts" : "Your cutting plan and the empty space"}">${g}</svg>`;
+  g += dimLines(L, W, u);
+  const pad = u * 4;
+  return `<svg viewBox="${-pad} ${-pad} ${L + pad + 10} ${W + pad + 10}" role="img" aria-label="${after ? `The same sheet with ${r.neighbours.length} buyers' parts placed in the empty space` : "Your cutting plan; the hatched area would go to scrap"}">${g}</svg>`;
 }
 function gField(label, path, type = "number", extra = "") {
   const [a, b] = path.split(".");
@@ -733,32 +864,47 @@ async function vGap(el) {
   const demo = await api("/api/gapfill/demo");  // sample orders plus standing orders buyers posted in this demo
   if (!st.gf) st.gf = demo;
   else st.gf.orders = [...st.gf.orders.filter(o => !o.posted), ...demo.orders.filter(o => o.posted)];
-  const postedTag = id => (st.gf.orders.find(o => o.id === id) || {}).posted ? ' <span class="pill p-warn">Posted by a buyer in this demo</span>' : "";
+  const byId = Object.fromEntries(st.gf.orders.map(o => [o.id, o]));
+  const postedTag = id => (byId[id] || {}).posted ? " " + badge("posted") : "";
   let r, err;
   try { r = await api("/api/gapfill?record=true", {...st.gf, declined_order_ids: st.gfDeclined}); } catch (e) { err = e; }
-  const ctrl = `<div class="card noprint"><div class="ctrl"><span class="lbl">Sheet</span>${gField("Length mm", "sheet.length_mm", "number", 'min="200" step="10"')}${gField("Width mm", "sheet.width_mm", "number", 'min="200" step="10"')}
-    <label class="field">Thickness mm<select data-gf="sheet.thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === st.gf.sheet.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
-    <label class="field">Grade<select data-gf="sheet.grade">${["E250", "E350"].map(g => `<option ${g === st.gf.sheet.grade ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
-    <div class="ctrl"><span class="lbl">Your job</span>${gField("Part", "job.part_name", "text", 'style="width:130px"')}${gField("Length mm", "job.length_mm", "number", 'min="10" step="10"')}${gField("Width mm", "job.width_mm", "number", 'min="10" step="10"')}${gField("Quantity", "job.quantity", "number", 'min="1" step="1"')}</div>
-    <div class="ctrl"><span class="lbl">Prices (sample)</span>${gField("Scrap ₹/kg", "prices.scrap_price_per_kg", "number", 'min="0" step="1"')}${gField("Pickup ₹", "prices.pickup", "number", 'min="0" step="50"')}<div class="grow"></div><button class="btn" id="gfReset" type="button">Reset demo</button></div></div>`;
+  const s = st.gf.sheet, j = st.gf.job;
+  const ctrl = `<details class="panel noprint" id="gfPanel" ${st.gfOpen ? "open" : ""}><summary>${ic("sliders-horizontal")}Change the job <span class="mut" style="font-weight:400">· ${num(s.length_mm)} × ${num(s.width_mm)} × ${num(s.thickness_mm)} mm ${esc(s.grade)} sheet, ${num(j.quantity)} ${esc(plural(j.part_name))} ${num(j.length_mm)} × ${num(j.width_mm)} mm</span>${ic("chevron-down", "sm chev")}</summary><div class="fold-body">
+    <div class="ctrl"><span class="lbl">Sheet</span>${gField("Length (mm)", "sheet.length_mm", "number", 'min="200" step="10"')}${gField("Width (mm)", "sheet.width_mm", "number", 'min="200" step="10"')}
+      <label class="field">Thickness (mm)<select data-gf="sheet.thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === s.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+      <label class="field">Grade<select data-gf="sheet.grade">${["E250", "E350"].map(g => `<option ${g === s.grade ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
+    <div class="ctrl"><span class="lbl">Your job</span>${gField("Part", "job.part_name", "text", 'style="width:140px"')}${gField("Length (mm)", "job.length_mm", "number", 'min="10" step="10"')}${gField("Width (mm)", "job.width_mm", "number", 'min="10" step="10"')}${gField("How many", "job.quantity", "number", 'min="1" step="1"')}</div>
+    <div class="ctrl"><span class="lbl">Prices ${badge("sample")}</span>${gField("Scrap (₹/kg)", "prices.scrap_price_per_kg", "number", 'min="0" step="1"')}${gField("Pickup (₹)", "prices.pickup", "number", 'min="0" step="50"')}<div class="grow"></div><button class="btn" id="gfReset" type="button">${ic("refresh-cw")}Reset the demo</button></div></div></details>`;
   if (err) { el.innerHTML = ctrl + errBox(err); bindG(); return; }
   const mo = r.money, colours = {};
   r.neighbours.forEach((n, i) => colours[n.order_id] = OCOL[i % OCOL.length]);
-  const units = r.neighbours.reduce((a, n) => a + n.units, 0), mx = Math.max(mo.scrap_alone, mo.total_with_gap_fill, 1);
-  let h = ctrl;
-  h += `<div class="tiles"><div class="tile"><b>${inr(mo.scrap_alone)}</b><span>Leftover sold as scrap (${num(mo.leftover_kg, 1)} kg)</span></div><div class="tile"><b>${inr(mo.total_with_gap_fill)}</b><span>Same leftover, sold before it's cut</span></div><div class="tile hi"><b>${inr(mo.net_gain)}</b><span>Extra for you, after ${inr(mo.pickup)} pickup</span></div><div class="tile"><b>${mo.ratio ? "×" + num(mo.ratio, 2) : "–"}</b><span>${units} neighbour parts reserved</span></div></div>`;
-  h += `<div class="card"><div class="ctrl"><h2>One sheet, two kinds of customer</h2>${r.checks.ok ? '<span class="pill p-ok">Checked: no overlaps, inside margins</span>' : `<span class="pill p-bad">Check failed</span>`}${chip(r.label)}<div class="grow"></div><button class="btn noprint" id="gfPrint" type="button">Print cutting plan</button></div>
-    <p class="mut">${esc(r.message)}${r.worth_doing ? ` Best layout: ${esc(r.option)}.` : ""}</p>
-    <div class="cols"><div class="big"><h4>Before: your job, the rest goes to scrap</h4>${gapSvg(r, false, colours)}</div><div class="big"><h4>After: the gap is sold before it's cut</h4>${gapSvg(r, true, colours)}</div></div>
-    <div class="leg"><span><i style="background:var(--own)"></i>Your ${esc(r.own.part_name)} × ${r.own.units}</span><span><i style="background:repeating-linear-gradient(45deg,var(--scrap),var(--scrap) 3px,var(--bg) 3px,var(--bg) 6px)"></i>Empty space (scrap)</span>${r.neighbours.map(n => `<span><i style="background:${colours[n.order_id]}"></i>${esc(n.order_id)} ${esc(n.buyer_name)}: ${esc(n.part_name)} × ${n.units}</span>`).join("")}</div>
-    <div><h4>Value of the leftover</h4><div class="orow"><div>Sold as scrap</div><div class="bar"><i style="width:${mo.scrap_alone / mx * 100}%;background:var(--scrap)"></i></div><div class="v">${inr(mo.scrap_alone)}</div></div><div class="orow"><div>Sold before it's cut</div><div class="bar warn"><i style="width:${mo.total_with_gap_fill / mx * 100}%"></i></div><div class="v">${inr(mo.total_with_gap_fill)}</div></div>
-    <p class="note">Before it's cut = neighbours' parts ${inr(mo.neighbours_value)} + scrap of what is still left ${inr(mo.scrap_of_rest)} − pickup ${inr(mo.pickup)}. Part values are what each buyer would pay for the same steel from a new sheet, less handling and cutting. All prices are sample data.</p></div></div>`;
-  h += `<div class="cols"><div class="card"><h2>Reserved for neighbours</h2>${r.neighbours.length ? `<div class="scroll"><table><tr><th>Order</th><th>Buyer</th><th>Part</th><th class="n">Parts</th><th class="n">Value</th><th class="noprint"></th></tr>${r.neighbours.map(n => `<tr><td><span class="dot" style="background:${colours[n.order_id]}"></span>${esc(n.order_id)}</td><td>${esc(n.buyer_name)}${postedTag(n.order_id)}</td><td>${esc(n.part_name)}</td><td class="n">${n.units}</td><td class="n">${inr(n.value)}</td><td class="noprint"><button class="btn sm" data-decline="${esc(n.order_id)}" type="button">Decline</button></td></tr>`).join("")}</table></div>` : `<div class="empty">Nothing reserved. Filling the gap would not beat selling the leftover as scrap.</div>`}
-    <p class="note">If a buyer declines, the plan is recalculated at once and their space goes to the next best order.</p></div>
-    <div class="card"><h2>Orders not used (${r.refused.length})</h2><ul class="rej">${r.refused.map(x => `<li><code>${esc(x.order_id)}</code> ${esc(x.reason)}${st.gfDeclined.includes(x.order_id) ? ` <button class="btn sm noprint" data-restore="${esc(x.order_id)}" type="button">Restore</button>` : ""}</li>`).join("") || "<li>None</li>"}</ul>
-    <h4>Standing orders in the cluster</h4><div class="scroll"><table><tr><th>Order</th><th>Buyer</th><th>Part mm</th><th class="n">t mm</th><th>Grades</th><th class="n">Qty</th></tr>${st.gf.orders.map(o => `<tr><td>${esc(o.id)}</td><td class="w">${esc(o.buyer_name)}${postedTag(o.id)}</td><td>${esc(o.part_name)} ${num(o.length_mm)}×${num(o.width_mm)}</td><td class="n">${num(o.thickness_mm)}</td><td>${o.accepted_grades.map(esc).join(", ")}</td><td class="n">${o.quantity}</td></tr>`).join("")}</table></div></div></div>`;
+  const parts = r.neighbours.reduce((a, n) => a + n.units, 0), buyers = new Set(r.neighbours.map(n => short(n.buyer_name))).size;
+  let h = `<div class="card"><div class="hero">
+      <div class="stack" style="gap:12px">
+        <p class="idea">Before you cut your own job, the empty part of the sheet is cut into parts that nearby buyers have already ordered, so it is sold instead of scrapped.</p>
+        ${r.worth_doing ? `<div><div class="hero-num acc" id="gfHero">+${inr(mo.net_gain)}</div><p class="hero-sub">extra for this sheet's leftover: <b>${inr(mo.total_with_gap_fill)}</b> instead of <b>${inr(mo.scrap_alone)}</b> as scrap</p></div>
+          <div class="ctrl"><span class="pill p-ok" title="Every part was re-checked by an independent checker">${ic("shield-check", "sm")}No overlaps, inside the edge strip</span>${badge("sample", "Sample prices")}<span class="mut">${parts} parts for ${buyers} buyer${buyers === 1 ? "" : "s"}</span></div>`
+          : `<div><div class="hero-num">${inr(mo.scrap_alone)}</div><p class="hero-sub">Selling the leftover as scrap is the better choice for this job: filling the gap would not beat it after pickup.</p></div>`}
+      </div>
+      <div class="stack" style="gap:var(--s2)"><h4>Where the leftover's value comes from</h4>${ladder({scrap: mo.scrap_alone, transport: mo.pickup, gain: r.worth_doing ? mo.net_gain : 0, scrapLabel: "Scrap value of the leftover", gainLabel: "Extra for you"})}
+        <p class="note">Each part is valued at what its buyer would pay for the same steel from a new sheet, less handling and cutting. All prices are sample data.</p></div></div></div>`;
+  h += ctrl;
+  h += `<div class="card"><div class="ctrl"><h2>One sheet, two kinds of customer</h2><div class="grow"></div><button class="btn sm noprint" id="gfPrint" type="button">${ic("printer", "sm")}Print the cutting plan</button></div>
+    <div class="gf-draw ${REDUCED() ? "" : "anim"}"><figure><figcaption><span class="pill p-mut">Before</span><span class="mut">Your job; the hatched area goes to scrap</span></figcaption>${gapSvg(r, false, colours)}</figure>
+      <figure><figcaption><span class="pill p-ok">After</span><span class="mut">The empty space is sold before it is cut</span></figcaption>${gapSvg(r, true, colours)}</figure></div>
+    <div class="leg"><span><i style="background:var(--own)"></i>Your ${esc(plural(r.own.part_name))} × ${r.own.units}</span><span><i style="background:repeating-linear-gradient(45deg,var(--scrap) 0 3px,var(--panel-2) 3px 6px)"></i>Scrap</span>${r.neighbours.map(n => `<span><i style="background:${colours[n.order_id]}"></i>${esc(orderName(n))} × ${n.units}<span class="code">${esc(n.order_id)}</span></span>`).join("")}</div>
+    <p class="note">Parts are placed with a ${num(st.gf.kerf_mm, 0)} mm ${term("blade gap", "kerf")} and a ${num(r.edge_margin_mm)} mm edge strip (dashed) that is never cut. Measurements in mm.</p></div>`;
+  h += `<div class="card"><div class="section-title"><h2>Reserved for nearby buyers</h2><span class="mut">If a buyer declines, the plan is worked out again at once and the space goes to the next best order.</span></div>
+    ${r.neighbours.length ? `<div class="olist">${r.neighbours.map(n => `<div class="orow2"><span class="sw" style="background:${colours[n.order_id]}"></span>
+        <div class="nm"><b>${esc(orderName(n))} ${codeTag(n.order_id)}${postedTag(n.order_id)}</b><span class="note">${n.units} part${n.units === 1 ? "" : "s"}${byId[n.order_id] ? ` · ${num(byId[n.order_id].length_mm)} × ${num(byId[n.order_id].width_mm)} mm` : ""} · ${esc(n.buyer_name)}</span></div>
+        <span class="num">${inr(n.value)}</span><button class="btn sm noprint" data-decline="${esc(n.order_id)}" type="button">Decline</button></div>`).join("")}</div>`
+      : emptyState("scissors", "Nothing is reserved: filling the gap would not beat selling the leftover as scrap.")}
+    ${fold(`Show details: orders not used (${r.refused.length}) and all standing orders`, `<ul class="rej">${r.refused.map(x => `<li><b>${esc(byId[x.order_id] ? orderName(byId[x.order_id]) : x.order_id)}</b> ${codeTag(x.order_id)}: ${esc(x.reason)}${st.gfDeclined.includes(x.order_id) ? ` <button class="btn sm noprint" data-restore="${esc(x.order_id)}" type="button">Restore</button>` : ""}</li>`).join("") || "<li>None</li>"}</ul>
+      <div class="scroll"><table><tr><th>Order</th><th>Part size</th><th class="n">Thickness</th><th>Grades</th><th class="n">How many</th></tr>${st.gf.orders.map(o => `<tr><td class="w"><b>${esc(orderName(o))}</b> ${codeTag(o.id)}${postedTag(o.id)}</td><td>${num(o.length_mm)} × ${num(o.width_mm)} mm</td><td class="n">${num(o.thickness_mm)} mm</td><td>${o.accepted_grades.map(esc).join(", ")}</td><td class="n">${o.quantity}</td></tr>`).join("")}</table></div>
+      <p class="note">Sold before it's cut = buyers' parts ${inr(mo.neighbours_value)} + scrap of what is still left ${inr(mo.scrap_of_rest)} − pickup ${inr(mo.pickup)}.</p>`)}</div>`;
   el.innerHTML = h;
   bindG();
+  if (r.worth_doing) countUp($("#gfHero", el), mo.net_gain, r.neighbours.length * 160 + 750, v => "+" + inr(v));
   function bindG() {
     el.querySelectorAll("[data-gf]").forEach(inp => inp.onchange = () => {
       const [a, b] = inp.dataset.gf.split(".");
@@ -767,9 +913,10 @@ async function vGap(el) {
       if (inp.type === "number" && !(v >= 0)) return;
       st.gf[a][b] = v; render();
     });
-    const rs = $("#gfReset", el); if (rs) rs.onclick = () => { st.gf = null; st.gfDeclined = []; render(); };
+    const pn = $("#gfPanel", el); if (pn) pn.ontoggle = () => { st.gfOpen = pn.open; };
+    const rs = $("#gfReset", el); if (rs) rs.onclick = () => { st.gf = null; st.gfDeclined = []; toast("The demo job is back to its starting point."); render(); };
     const pr = $("#gfPrint", el); if (pr) pr.onclick = () => window.print();
-    el.querySelectorAll("[data-decline]").forEach(b => b.onclick = () => { st.gfDeclined.push(b.dataset.decline); render(); });
+    el.querySelectorAll("[data-decline]").forEach(b => b.onclick = () => { st.gfDeclined.push(b.dataset.decline); toast(`${esc(byId[b.dataset.decline] ? orderName(byId[b.dataset.decline]) : b.dataset.decline)} declined. The plan was worked out again.`); render(); });
     el.querySelectorAll("[data-restore]").forEach(b => b.onclick = () => { st.gfDeclined = st.gfDeclined.filter(x => x !== b.dataset.restore); render(); });
   }
 }
@@ -923,7 +1070,6 @@ async function vPickup(el) {
     };
   }
 }
-const cap1 = s => s ? s[0].toUpperCase() + s.slice(1) : "";
 
 /* ---------------- Admin ---------------- */
 async function vQuality(el) {
@@ -971,25 +1117,50 @@ async function vSim(el) {
   <div class="card"><h2>Assumptions</h2><div class="scroll"><table><tr><th>Input</th><th>Value</th><th>Status</th></tr><tr><td>Sheet, kerf, edge margin</td><td>2500 × 1250 mm, 3 mm, 10 mm</td><td>Typical</td></tr><tr><td>New plate / scrap</td><td>₹65/kg / ₹32/kg</td><td>${chip("assumption")}</td></tr><tr><td>Handling, cutting, pickup</td><td>₹2 per part, ₹6 per m, ₹300 per run</td><td>${chip("assumption")}</td></tr><tr><td>Demand</td><td>13 part types, five demand levels</td><td>${chip("sample")}</td></tr></table></div><p class="note">Source: research/gap_fill_sim.py. Run it again with real prices to update these figures.</p></div>`;
 }
 
+/* ---------------- Welcome ---------------- */
+const MARK = `<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/><rect x="8.5" y="13" width="5" height="6" rx=".5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.6 1.4" opacity=".7"/><rect x="17" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" opacity=".55"/><rect x="19.5" y="11" width="6" height="7" rx="1" fill="#f2a33a"/><path d="M13 21.5h4.2" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round"/><path d="M15.6 19.9l1.8 1.6-1.8 1.6" fill="none" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+async function vWelcome(el) {
+  const C = await credits(), hero = Object.values(C).find(c => c.category === (st.lane === "fresh" ? "hero_kitchen" : "hero_workshop"));
+  const credit = hero ? `${hero.shows}. "${hero.title}" by ${hero.author}, ${hero.licence}, via ${hero.site || "Wikimedia Commons"}` : "";
+  el.innerHTML = `<div class="welcome">
+    <section class="wh">${hero ? `<img src="${esc(hero.file)}" alt="${esc(hero.shows)}"><span class="ptag" title="Illustrative photo. ${esc(credit)}">Illustrative photo · <a href="${esc(hero.source_url)}" target="_blank" rel="noopener" title="${esc(credit)}">Credit</a></span>` : ""}
+      <div class="wh-in">${MARK}<h1>Surplus, sold before it becomes scrap</h1><p>An ERP-connected B2B marketplace for industrial and food surplus.</p></div></section>
+    <section class="flow" aria-label="How it works">
+      <div class="fstep">${ic("plug")}<div><b>Find surplus in your system</b><span>Connect an ERP or billing export; offcuts, idle stock and food near its use-by are spotted for you.</span></div></div>${ic("arrow-right", "lg")}
+      <div class="fstep">${ic("store")}<div><b>Match it on the marketplace</b><span>Buyers' orders are matched to the pieces and lots that fit, at a fair price.</span></div></div>${ic("arrow-right", "lg")}
+      <div class="fstep">${ic("truck")}<div><b>Deliver it</b><span>One pickup route, the right vehicle and the papers for the driver.</span></div></div></section>
+    <section class="roles" aria-label="Choose your role">
+      <div class="role"><span class="rico">${ic("shopping-cart")}</span><h2>Buyer</h2><p>Post what you need or browse surplus near you, and order parts cut from it.</p><button class="btn" type="button" data-go="buyer/browse">Open the marketplace ${ic("arrow-right", "sm")}</button></div>
+      <div class="role"><span class="rico">${ic("factory")}</span><h2>Seller</h2><p>Connect your stock, see what is surplus, and sell the spare part of your next sheet before you cut it.</p><button class="btn" type="button" data-go="seller/connect">Open my workshop ${ic("arrow-right", "sm")}</button></div>
+      <div class="role"><span class="rico">${ic("shield-check")}</span><h2>Admin</h2><p>Follow every deal, see where each number comes from, and review the rules.</p><button class="btn" type="button" data-go="admin/monitor">Open the platform ${ic("arrow-right", "sm")}</button></div></section>
+    <section class="start"><div><h2>New here? Start with the main idea</h2><p class="mut">A workshop sells the empty part of its next steel sheet to nearby buyers, before it cuts it. One screen, one number.</p></div>
+      <button class="btn pri lg" type="button" data-go="seller/gapfill/durable">Start here ${ic("arrow-right")}</button></section>
+    <p class="note">Every business, price and quantity in this demo is made up (Sample). The matching engine is real.</p></div>`;
+  el.querySelectorAll("[data-go]").forEach(b => b.onclick = () => { const [role, view, lane] = b.dataset.go.split("/"); go({role, view, ...(lane ? {lane} : {})}); });
+}
+
 /* ---------------- render ---------------- */
-const VIEWS = {post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {welcome: vWelcome, post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();
-  const my = ++ticket, main = $("#main");
-  const [t, sub] = TITLES[st.view];
-  const head = `<header><h1>${esc(t)}</h1><p class="mut">${esc(sub)}</p></header>`;
+  const my = ++ticket, main = $("#main"), welcome = st.view === "welcome";
+  const [t, sub] = welcome ? ["CIRCULATE", ""] : TITLES[st.view];
+  const head = welcome ? "" : `<header><h1>${esc(t)}</h1><p class="lead">${esc(sub)}</p></header>`;
   const body = document.createElement("div");
   body.className = "stack";
-  if (!main.dataset.view || main.dataset.view !== st.view + st.lane + st.role) main.innerHTML = head + `<div class="spin">Loading…</div>`;
+  const key = st.view + st.lane + st.role;
+  if (main.dataset.view !== key) main.innerHTML = head + `<div class="skel-page" aria-busy="true"><div class="skel"></div><div class="skel"></div></div>`;
   try { await VIEWS[st.view](body); } catch (e) { body.innerHTML = errBox(e); }
   if (my !== ticket) return;
-  main.dataset.view = st.view + st.lane + st.role;
+  const fresh = main.dataset.view !== key;
+  main.dataset.view = key;
   main.replaceChildren();
-  main.insertAdjacentHTML("beforeend", head);
+  if (head) main.insertAdjacentHTML("beforeend", head);
   main.appendChild(body);
-  document.title = `${t} · CIRCULATE`;
+  document.title = welcome ? "CIRCULATE · Surplus, sold before it becomes scrap" : `${t} · CIRCULATE`;
+  if (fresh) window.scrollTo(0, 0);
 }
 readHash();
-history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`);
+if (st.view !== "welcome") history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`);
 render();

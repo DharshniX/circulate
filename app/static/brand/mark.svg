@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="CIRCULATE">
+  <title>CIRCULATE</title>
+  <!-- the first sheet, with the space where a piece was cut -->
+  <rect x="2" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>
+  <rect x="8.5" y="13" width="5" height="6" rx="0.5" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="1.6 1.4" opacity=".7"/>
+  <!-- the second sheet -->
+  <rect x="17" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2" opacity=".55"/>
+  <!-- the piece, moving out into the second sheet -->
+  <rect x="19.5" y="11" width="6" height="7" rx="1" fill="#f2a33a"/>
+  <path d="M13 21.5h4.2" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round"/>
+  <path d="M15.6 19.9l1.8 1.6-1.8 1.6" fill="none" stroke="#f2a33a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

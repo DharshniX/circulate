@@ -43,7 +43,7 @@ def test_an_order_is_filled_from_a_manually_entered_item():
     assert b["sellers_used"] == ["YOU"] and b["units"] > 0 and b["pickup_order"] == ["YOU"]
     a = b["allocations"][0]
     assert a["resource_id"] == f"YOU-{item['item_id']}" and len(a["parts"]) == b["units"]  # a real cutting plan
-    deal = c.post("/api/deals", json={"kind": "flat", "counterfactual": "recycled", "demand_id": "S1", "buyer_name": "Workshop W",
+    deal = c.post("/api/deals", json={"kind": "flat", "counterfactual": "recycled", "demand_id": "S1", "buyer_name": "Ezhil Engineering Works, Ambattur",
                                       "sellers": ["YOU"], "units": b["units"], "unit_name": "parts", "kg_in_units": b["kg_in_units"],
                                       "kg_shipped": b["kg_shipped"], "route_km": b["route_km"], "value_above_salvage": 0,
                                       "scenario": "steel"}).json()
@@ -69,8 +69,11 @@ def test_a_piece_that_fits_several_parts():
     refs = {o["part_name"]: o for o in b["options"] if o["source"] == "reference"}
     assert {o["id"] for o in orders} >= {"S1", "S2", "S3"} and all(o["label"].startswith("Ordered by ") for o in orders)
     assert len(refs) == len(BEC.REFERENCE_PARTS) and all(o["label"] == "Common part, no buyer yet" for o in refs.values())
-    vals = [o["value_above_scrap"] for o in b["options"]]
-    assert vals == sorted(vals, reverse=True)  # ranked by value above scrap
+    kinds = [o["source"] == "reference" for o in b["options"]]
+    assert kinds == sorted(kinds)  # options with a real buyer come before common parts with no buyer
+    for group in (False, True):  # then by value above scrap
+        vals = [o["value_above_scrap"] for o in b["options"] if (o["source"] == "reference") is group]
+        assert vals == sorted(vals, reverse=True)
     for o in b["options"]:  # every plan is a real, checked plan from the nesting engine
         det = o["detail"]
         from engine.nesting import Placement
@@ -125,7 +128,7 @@ def test_a_fresh_lot_with_too_few_hours():
 def test_a_donation():
     b = options("food", "H3")  # cooked rice and dal: donation only
     [o] = b["options"]
-    assert o["buyer_name"] == "Food bank N" and o["is_donation"] and o["buyer_value"] == 0 and o["units"] == 18
+    assert o["buyer_name"] == "Thozhan Food Bank, Saidapet" and o["is_donation"] and o["buyer_value"] == 0 and o["units"] == 18
     assert o["value_above_scrap"] == pytest.approx(0 - o["scrap_value"] - o["transport"], abs=0.01)
     assert o["hours_on_arrival"] < 5 and o["hours_on_arrival"] >= o["min_hours_on_arrival"]
     hostel = next(r for r in b["refused"] if "Hostel" in r["label"])
@@ -143,7 +146,7 @@ def test_own_item_becomes_with_the_cluster_scrap_price():
 
 def test_passport_shows_what_it_can_become():
     page = c.get("/passport/steel/A3").text
-    assert "What can this become?" in page and "Ordered by Workshop W" in page and "Common part, no buyer yet" in page
+    assert "What can this become?" in page and "Ordered by Ezhil Engineering Works, Ambattur" in page and "Common part, no buyer yet" in page
     assert '<svg class="plan"' in page and "Not possible" in page
     food = c.get("/passport/food/H3").text
-    assert "Food bank N" in food and "donation" in food
+    assert "Thozhan Food Bank, Saidapet" in food and "donation" in food

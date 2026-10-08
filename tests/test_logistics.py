@@ -40,7 +40,7 @@ def test_route_vehicle_and_cost_come_from_the_engine():
     lg = c.get(f"/api/deals/{i}/logistics").json()
     assert lg["pickup_order"] == b["pickup_order"] and lg["matches_deal"]
     assert [x["seller_id"] for x in lg["collect"]] == b["pickup_order"]
-    assert lg["legs"][0]["from"] == "Workshop W" and lg["legs"][-1]["to"] == "Workshop W"
+    assert lg["legs"][0]["from"] == "Ezhil Engineering Works, Ambattur" and lg["legs"][-1]["to"] == "Ezhil Engineering Works, Ambattur"
     assert len(lg["legs"]) == len(b["pickup_order"]) + 1
     assert sum(x["km"] for x in lg["legs"]) == pytest.approx(b["route_km"], abs=0.02)
     v = lg["vehicle"]
@@ -65,7 +65,7 @@ def test_older_database_gets_new_columns_and_keeps_rows(tmp_path, monkeypatch):
         value_above_salvage REAL, buyer_utilisation REAL, status TEXT, is_simulated INTEGER, evidence TEXT, buyer_confirmed INTEGER, history TEXT)""")
     con.execute("INSERT INTO deals (kind, demand_id, buyer_name, sellers, status, is_simulated, evidence, buyer_confirmed, history, units, "
                 "unit_name, kg_in_units, kg_shipped, route_km, value_above_salvage, counterfactual) VALUES "
-                "('flat','S1','Workshop W','[\"A\",\"B\"]','agreed',1,'[]',0,'[]',600,'parts',1,1,1,1,'recycled')")
+                "('flat','S1','Ezhil Engineering Works, Ambattur','[\"A\",\"B\"]','agreed',1,'[]',0,'[]',600,'parts',1,1,1,1,'recycled')")
     con.commit()
     con.close()
     monkeypatch.setattr(main, "DB", old)
@@ -121,13 +121,13 @@ def test_printable_pickup_sheet_and_challan():
     i, b = accept("food", 0)
     c.post(f"/api/deals/{i}/booking", json={"pickup_date": TOMORROW, "slot": "14:00-16:00"})
     sheet = c.get(f"/deals/{i}/pickup-sheet").text
-    names = [x["seller_name"] for x in b["per_seller"]]
-    order = [next(n for n in names if n.endswith(" " + sid)) for sid in b["pickup_order"]]
+    name_of = {x["seller_id"]: x["seller_name"] for x in b["per_seller"]}
+    order = [name_of[sid] for sid in b["pickup_order"]]
     positions = [sheet.index(n) for n in order]
     assert positions == sorted(positions)  # sellers listed in the engine's pickup order
     assert "simulated" in sheet and "Contact: ______________" in sheet and "14:00-16:00" in sheet
     challan = c.get(f"/deals/{i}/challan").text
-    assert "Delivery challan (simulated)" in challan and "Hostel mess M" in challan and "Not a tax invoice" in challan
+    assert "Delivery challan (simulated)" in challan and "Anna Nagar Boys" in challan and "Not a tax invoice" in challan
     assert f"SIM-{i:05d}" in challan
     assert c.get("/deals/999/challan").status_code == 404
 
