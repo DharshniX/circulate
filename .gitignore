@@ -1,6 +1,7 @@
 .venv/
 __pycache__/
-circulate.db
+*.db
 .pytest_cache/
 uploads/
 erp_drop/
+_claude_tmp/
