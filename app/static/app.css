@@ -205,6 +205,18 @@ details summary{cursor:pointer}
 .mres.ok{background:var(--okbg);color:var(--ok)}.mres.warn{background:var(--warnbg);color:var(--warn)}
 .mres p{color:var(--fg)}
 
+/* ---------- what can this become? ---------- */
+.become{border-top:1px solid var(--line);padding-top:12px}
+.bwrap{display:flex;flex-direction:column;gap:var(--s1)}
+.bopt{display:grid;grid-template-columns:96px minmax(0,1fr);gap:12px;align-items:center;padding:var(--s1);border:1px solid var(--line);border-radius:var(--r-ctl);background:var(--panel)}
+.bopt:not(:has(.bdraw)){grid-template-columns:minmax(0,1fr)}
+.bopt.ref{border-style:dashed}
+.bdraw .sheet{width:96px}.bdraw .bplan{width:96px;height:auto;display:block}
+.bbody{display:flex;flex-direction:column;gap:2px;min-width:0}.bbody .pill{align-self:flex-start}
+.bval{font:500 1.1rem var(--mono);font-variant-numeric:tabular-nums;color:var(--acc)}.bval.neg{color:var(--mut)}
+.bwrap details summary{font-size:13px;font-weight:600;padding:4px 0}
+.bwrap details .bopt{margin-top:var(--s1)}
+
 /* ---------- motion ---------- */
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{transition:none!important;animation:none!important;scroll-behavior:auto!important}.btn:active{transform:none}}
 

@@ -63,7 +63,11 @@ def test_imported_stock_appears_without_invented_prices():
     c.post("/api/import/list", json={"lane": "durable", "csv_text": text, "measured": True})
     imp = [i for i in items("durable").values() if i["key"] == "import_durable"]
     assert len(imp) == 5 and all(i["label"] == "measured" for i in imp)
-    assert all(i["floor"] is None and i["ceiling"] is None and i["distance_km"] is None and i["order"] is None for i in imp)
+    assert all(i["floor"] is None and i["ceiling"] is None for i in imp)  # still no invented prices on the card
+    # own items are now matched as "Your workshop": an order to open, or the engine's reason why none fits
+    assert all(i["match_seller"] == "YOU" and (i["order"] or i["order_reason"]) for i in imp)
+    ms103 = next(i for i in imp if i["id"] == "MS-103")  # 6 mm offcut: the sample orders are all 2 mm
+    assert ms103["order"] is None and "thickness" in ms103["order_reason"]
 
 
 def test_photo_upload_show_replace_and_remove():

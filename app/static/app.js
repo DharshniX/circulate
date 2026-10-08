@@ -122,6 +122,32 @@ function sheetSvg(a) {
 }
 const errBox = e => `<div class="err" role="alert">${esc(e.message || e)}</div>`;
 
+/* ---------------- What can this become? (shared by Browse surplus) ---------------- */
+function barSvg(det) {
+  const L = det.length_mm;
+  return `<svg class="bplan" viewBox="0 0 ${L} 140" role="img" aria-label="${det.cuts.length} cuts along the bar"><rect x="0" y="40" width="${L}" height="60" style="fill:var(--piece);stroke:var(--mut);stroke-width:${L / 200}"/>${det.cuts.map(c => `<rect x="${c.start_mm}" y="40" width="${c.length_mm}" height="60" style="fill:var(--part);stroke:var(--partl);stroke-width:${L / 400}"/>`).join("")}</svg>`;
+}
+function becomeHtml(b, top) {
+  const fresh = b.kind === "perishable", base = fresh ? "disposal" : "scrap";
+  const money = o => {
+    if (o.value_above_scrap == null) return `<span class="note">Count only: no new price for this material in the cluster.</span>`;
+    if (o.is_donation) return `<span class="note">Donation: avoids ${inr(-o.scrap_value)} disposal; pickup ${inr(o.transport)}.</span>`;
+    const v = o.value_above_scrap;
+    return `<b class="bval ${v < 0 ? "neg" : ""}">${inr(Math.abs(v))}</b> <span class="note">${v < 0 ? "below" : "above"} ${base}</span>`;
+  };
+  const what = o => fresh ? `${num(o.units, 1)} kg to ${esc(o.buyer_name)}` : `${num(o.units)} × ${esc(o.part_name)}`;
+  const size = o => fresh ? `${num(o.hours_on_arrival, 1)} h left on arrival (needs ${num(o.min_hours_on_arrival)} h)` : o.part_mm ? `${num(o.part_mm[0])} × ${num(o.part_mm[1])} mm${o.wanted ? ` · order wants ${num(o.wanted)}` : ""}` : `${num(o.cut_length_mm)} mm cuts · order wants ${num(o.wanted)}`;
+  const draw = o => o.detail && o.detail.shape === "sheet" ? sheetSvg({...o.detail, resource_id: "", units: o.units}).replace(/<figcaption>.*<\/figcaption>/, "") : o.detail && o.detail.shape === "bar" ? barSvg(o.detail) : "";
+  const card = o => `<div class="bopt ${o.source === "reference" ? "ref" : ""}">${draw(o) ? `<div class="bdraw">${draw(o)}</div>` : ""}<div class="bbody"><span class="pill ${o.source === "reference" ? "p-mut" : "p-ok"}">${esc(o.label)}</span>
+    <b>${what(o)}</b><span class="note">${size(o)}</span><div>${money(o)}</div></div></div>`;
+  const opts = b.options, shown = opts.slice(0, top), more = opts.slice(top);
+  const sc = b.scrap ? `Compared with ${base}: ${inr(Math.abs(b.scrap.value))} at ₹${num(Math.abs(b.scrap.price_per_kg), 1)}/kg · ${esc(cap1(b.scrap.label))} · ${b.scrap.quoted_on ? "quoted " + esc(b.scrap.quoted_on) : "no date"}.` : "";
+  return `<div class="bwrap"><p class="note">${sc} Ranked by value above ${base}. Prices are sample data.</p>
+    ${shown.length ? shown.map(card).join("") : `<p class="note">Nothing in this lane can use it right now.</p>`}
+    ${more.length ? `<details><summary>${more.length} more option(s)</summary>${more.map(card).join("")}</details>` : ""}
+    ${b.refused.length ? `<details><summary>Not possible (${b.refused.length})</summary><ul class="rej">${b.refused.map(r => `<li><b>${esc(r.label)}: ${esc(r.part_name)}</b> ${esc(r.reason)}</li>`).join("")}</ul></details>` : ""}</div>`;
+}
+
 /* ---------------- Buyer: browse surplus (marketplace listings) ---------------- */
 const cap = s => s ? s[0].toUpperCase() + s.slice(1) : "";
 const labelChip = l => l === "measured" ? chip("measured") : chip(l || "sample");
@@ -174,7 +200,8 @@ function listingCard(it, lane) {
       <dl class="lfacts"><dt>Seller</dt><dd>${esc(it.seller_name)}</dd><dt>Distance</dt><dd>${dist}</dd><dt>Weight</dt><dd>${num(it.kg, 1)} kg</dd><dt>Item</dt><dd><code>${esc(it.id)}</code></dd></dl>
       ${price}
       ${it.rules ? `<p class="note">${esc(it.source || "Imported from a CSV export")}. ${it.rules.includes("Listed by the seller") ? "Listed by the seller; no surplus rule caught it." : `Found as surplus: ${it.rules.map(esc).join("; ")}.`}</p>` : ""}
-      <div class="lact"><button class="btn pri sm" type="button" data-order="${esc(uid)}" ${it.order ? "" : "disabled"}>Order parts from this</button><a class="btn sm" href="${esc(it.passport)}" target="_blank" rel="noopener">Passport</a></div>
+      <div class="lact"><button class="btn pri sm" type="button" data-order="${esc(uid)}" ${it.order ? "" : "disabled"}>Order parts from this</button><a class="btn sm" href="${esc(it.passport)}" target="_blank" rel="noopener">Passport</a><button class="btn sm" type="button" data-become="${esc(uid)}" aria-expanded="false">What can this become?</button></div>
+      <div class="become" id="bc-${esc(uid.replace(/[^\w-]/g, "_"))}" hidden></div>
       ${it.order ? `<p class="note">Opens ${esc(it.order.buyer_name)}'s order with only ${esc(it.seller_name)} ticked.</p>` : `<p class="note lwhy">Cannot order yet: ${esc(it.order_reason)}</p>`}</div></article>`;
 }
 async function vBrowse(el) {
@@ -213,11 +240,23 @@ async function vBrowse(el) {
   for (const [id, k] of [["brMat", "mat"], ["brThick", "thick"], ["brSeller", "seller"], ["brSort", "sort"]]) { const s = $("#" + id, el); if (s) s.onchange = () => { F[k] = s.value; paint(); }; }
   $("#brClear", el).onclick = clear;
   grid.addEventListener("click", async e => {
+    const bb = e.target.closest("[data-become]");
+    if (bb) {
+      const it = byUid[bb.dataset.become], box = document.getElementById("bc-" + bb.dataset.become.replace(/[^\w-]/g, "_"));
+      const open = bb.getAttribute("aria-expanded") === "true";
+      bb.setAttribute("aria-expanded", String(!open)); box.hidden = open;
+      if (!open && !box.dataset.done) {
+        box.innerHTML = `<p class="note">Trying every order and common part…</p>`;
+        try { box.innerHTML = becomeHtml(await api(`/api/become/${encodeURIComponent(it.key)}/${encodeURIComponent(it.id)}`), 3); box.dataset.done = "1"; }
+        catch (x) { box.innerHTML = `<p class="err">${esc(x.message)}</p>`; }
+      }
+      return;
+    }
     const b = e.target.closest("[data-order]");
     if (!b) return;
     const it = byUid[b.dataset.order], k = it.order.scenario, S = await scen(k);
     st.scen[lane] = k; st.ord[k] = it.order.index;
-    st.off[k] = new Set(S.data.sellers.map(x => x.id).filter(id => id !== it.seller_id));
+    st.off[k] = new Set(S.data.sellers.map(x => x.id).filter(id => id !== (it.match_seller || it.seller_id)));
     go({view: "match"});
   });
   paint();
@@ -229,16 +268,18 @@ async function vMatch(el) {
   const i = Math.min(st.ord[k] ?? 0, S.data.demands.length - 1), d = S.data.demands[i];
   const off = st.off[k] || (st.off[k] = new Set());
   const rate = st.rate[k] ?? 1;
-  const data = structuredClone(S.data);
+  const own = await api(`/api/own-stock/${k}`);  // imported, auto-synced and hand-entered items, as "Your workshop"
+  const D = own.resources.length ? {...S.data, sellers: [...S.data.sellers, own.seller], resources: [...S.data.resources, ...own.resources]} : S.data;
+  const data = structuredClone(D);
   data.transport.rate_multiplier = rate;
-  const sellerIds = S.data.sellers.map(s => s.id).filter(id => !off.has(id));
-  const sellerName = id => (S.data.sellers.find(s => s.id === id) || {}).name || id;
+  const sellerIds = D.sellers.map(s => s.id).filter(id => !off.has(id));
+  const sellerName = id => (D.sellers.find(s => s.id === id) || {}).name || id;
   let f, err;
   try { f = await api("/api/fulfil", {demand_id: d.id, data, seller_ids: sellerIds, allow_partial: true}); } catch (e) { err = e; }
   const ctrl = `<div class="card noprint"><div class="ctrl">${await scenSeg()}
     <label class="field">Order<select id="ordSel">${S.data.demands.map((x, j) => `<option value="${j}" ${j === i ? "selected" : ""}>${esc(x.buyer_name)}: ${num(x.quantity, fresh ? 1 : 0)} ${esc(x.part_name)}</option>`).join("")}</select></label>
     <label class="field">Transport rate ×<input id="rate" type="number" min="0.2" max="5" step="0.1" value="${rate}"></label></div>
-    <div class="ctrl"><span class="lbl">Sellers in the cluster</span>${S.data.sellers.map(s => `<label class="check"><input type="checkbox" data-seller="${esc(s.id)}" ${off.has(s.id) ? "" : "checked"}>${esc(s.name)}</label>`).join("")}</div></div>`;
+    <div class="ctrl"><span class="lbl">Sellers in the cluster</span>${D.sellers.map(s => `<label class="check"><input type="checkbox" data-seller="${esc(s.id)}" ${off.has(s.id) ? "" : "checked"}>${esc(s.name)}</label>`).join("")}</div></div>`;
   if (err) { el.innerHTML = ctrl + errBox(err); bind(); return; }
   const b = f.best;
   let h = ctrl;

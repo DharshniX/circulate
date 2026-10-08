@@ -371,7 +371,12 @@ main{{max-width:520px;margin:0 auto;padding:20px 16px;display:flex;flex-directio
 h1{{font-size:1.3rem;margin:0}} dl{{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0}} dt{{color:#5d6b77}} dd{{margin:0}}
 .chip{{display:inline-block;background:#fff2dc;color:#8a4b00;border:1px solid #8a4b00;border-radius:99px;padding:1px 10px;font-size:12px;font-weight:600;text-transform:uppercase}}
 svg{{width:140px;height:140px}} .note{{color:#5d6b77;font-size:13px}}
-img.photo{{display:block;width:100%;height:auto;border-radius:6px;margin:8px 0}} form{{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}}
+img.photo{{display:block;width:100%;height:auto;border-radius:6px;margin:8px 0}}
+.opt{{border:1px solid #d9dfe4;border-radius:8px;padding:12px;margin:10px 0;display:grid;grid-template-columns:120px 1fr;gap:12px;align-items:center}}
+.opt svg.plan{{width:120px;height:auto;background:#eef1f4;border-radius:4px}} .opt b.v{{font-size:1.15rem;color:#b45f06}} .opt b.neg{{color:#5d6b77}}
+.tag{{display:inline-block;font-size:12px;font-weight:600;border-radius:99px;padding:1px 8px;background:#eef1f4;color:#17222b}} .tag.o{{background:#e2f3e9;color:#1d6b3f}}
+details{{margin-top:8px}} summary{{cursor:pointer;font-weight:600}} details li{{margin:4px 0;color:#5d6b77}}
+@media (max-width:420px){{.opt{{grid-template-columns:1fr}} .opt svg.plan{{width:100%}}}} form{{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:8px 0}}
 button{{font:inherit;font-weight:600;padding:6px 14px;border-radius:6px;border:1px solid #c4ccd3;background:#fff;cursor:pointer}} button:hover{{border-color:#5d6b77}}
 button:focus-visible,input:focus-visible{{outline:2px solid #d9780f;outline-offset:2px}}
 @media print{{body{{background:#fff}} .noprint{{display:none}}}}
@@ -402,6 +407,7 @@ def passport(key: str, rid: str, request: Request):
     body = (f'<div class="card"><h1>Offcut passport</h1><p><span class="chip">{e(item["label"])} data</span></p><dl>{dl}</dl></div>'
             f'<div class="card"><b>Deal history</b><p class="note">No deals recorded for this item yet. A deal appears here once it is dispatched and confirmed.</p></div>'
             f'<div class="card"><img alt="QR code for this passport" src="{e(qr_url)}" width="140" height="140"><p class="note">Scan to open this passport.</p></div>'
+            + _become_card(key, rid)
             + _photo_card(key, rid, item))
     return _PAGE.format(title=f"Passport {item['id']}", body=body)
 
@@ -723,8 +729,7 @@ def _browse_imported(lane: str) -> list[dict]:
         item = {**p.model_dump(mode="json"), "key": key, "label": r["label"], "seller_name": p.seller_id,
                 "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2), "distance_km": None,
                 "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id), "rules": json.loads(r["rules"]),
-                "source": r["source"] or IMP.SOURCE, "order": None,
-                "order_reason": "Imported stock is not in the matching data yet. Open its passport to contact the seller."}
+                "source": r["source"] or IMP.SOURCE, "match_seller": OWN_ID, **_own_order(p)}
         if p.kind == "perishable":
             item["disposal"] = None
         else:
@@ -775,7 +780,7 @@ def _logistics(row, now: datetime | None = None) -> dict:
         (k for k in SC.SCENARIOS if any(d.id == row["demand_id"] for d in SC.dataset(k)["demands"])), None)
     if key is None:
         raise HTTPException(422, f"deal {row['id']} refers to order {row['demand_id']}, which is in no scenario")
-    d = SC.dataset(key)
+    d = _dataset_with_own(key)
     demand = next(x for x in d["demands"] if x.id == row["demand_id"])
     used = json.loads(row["sellers"])
     sellers = [x for x in d["sellers"] if x.id in used]
@@ -1146,3 +1151,200 @@ def manual_entry(lane: Literal["durable", "fresh"], m: ManualItem, now: datetime
     out.update(listed_rules=rules, stock_key=key, passport=f"/passport/{key}/{r['item']['id']}",
                photo=_write_photo(key, r["item"]["id"], *photo) if photo else None)
     return out
+
+
+# ---------------- Your own stock in matching, and "What can this become?" ----------------
+from engine import become as BEC
+from engine.gapfill import GapFillPrices, StandingOrder
+from engine.models import FlatPiece, PerishableLot
+
+OWN_ID, OWN_NAME = "YOU", "Your workshop"
+
+
+def _own_seller(d: dict) -> Seller:
+    """The seller's own business, placed at the centre of the cluster's sellers, with the cluster's sample scrap prices."""
+    xs, ys = [x.x_km for x in d["sellers"]], [x.y_km for x in d["sellers"]]
+    salvage = {}
+    for x in d["sellers"]:
+        for o in x.salvage:
+            salvage.setdefault(o.applies_to, o)
+    return Seller(id=OWN_ID, name=OWN_NAME, x_km=round(sum(xs) / len(xs), 2), y_km=round(sum(ys) / len(ys), 2),
+                  salvage=list(salvage.values()), fssai_licensed=False, label="sample")
+
+
+def _own_items(lane: str) -> list:
+    with closing(db()) as con:
+        rows = con.execute("SELECT item, label FROM imported_stock WHERE lane=? ORDER BY listed_at, item_id", (lane,)).fetchall()
+    out = []
+    for r in rows:
+        data = {**json.loads(r["item"]), "label": r["label"] if r["label"] in ("measured", "sample") else "sample"}
+        data.pop("days_unused", None)
+        out.append(FlatPiece(**data) if lane == "durable" else PerishableLot(**data))
+    return out
+
+
+def _own_resources(key: str) -> list:
+    """Imported, auto-synced and hand-entered items as "Your workshop" stock for one scenario (ids prefixed YOU-)."""
+    eng = SC.SCENARIOS[key]["engine"]
+    lane = "fresh" if eng == "perishable" else "durable"
+    return [x.model_copy(update={"id": f"{OWN_ID}-{x.id}", "seller_id": OWN_ID}) for x in _own_items(lane) if x.kind == eng]
+
+
+def _dataset_with_own(key: str) -> dict:
+    d = SC.dataset(key)
+    own = _own_resources(key)
+    if own:
+        d["sellers"] = d["sellers"] + [_own_seller(d)]
+        d["resources"] = d["resources"] + own
+    return d
+
+
+@app.get("/api/own-stock/{key}")
+def own_stock(key: str):
+    """Your own listed items as stock from "Your workshop", to add to a scenario before matching. Empty if there are none."""
+    if key not in SC.SCENARIOS:
+        raise HTTPException(404, f"unknown scenario {key}")
+    d = SC.dataset(key)
+    own = _own_resources(key)
+    return {"seller": _own_seller(d).model_dump(mode="json") if own else None,
+            "resources": [x.model_dump(mode="json") for x in own],
+            "note": "Your own items, placed at the centre of the cluster. Scrap prices are the cluster's sample prices."}
+
+
+def _own_order(p) -> dict:
+    """For an own item on Browse surplus: the first open order it fits, matched as Your workshop, or the reason it fits none."""
+    eng, why = REGISTRY[p.kind], None
+    for key, sc in SC.SCENARIOS.items():
+        if sc["engine"] != p.kind:
+            continue
+        d = SC.dataset(key)
+        seller = _own_seller(d)
+        for i, dm in enumerate(d["demands"]):
+            if dm.kind != p.kind or not eng.relevant(p, dm):
+                continue
+            reason = eng.check(p, dm, seller, d["settings"])
+            if reason is None:
+                return {"order": {"scenario": key, "index": i, "demand_id": dm.id, "buyer_name": dm.buyer_name}, "order_reason": None,
+                        "distance_km": round(_dist((seller.x_km, seller.y_km), (d["demands"][0].x_km, d["demands"][0].y_km)), 1)}
+            why = why or f"{dm.buyer_name}: {reason}"
+    return {"order": None, "order_reason": why or "No open order in this lane takes this kind of stock."}
+
+
+def _gap_standing() -> tuple[list, GapFillPrices]:
+    g = SC.gapfill_demo()
+    return [StandingOrder(**o) for o in g["orders"]], GapFillPrices(**g["prices"])
+
+
+def _reference_price(piece, demands: list, standing: list) -> tuple[float | None, str]:
+    """The cluster's lowest new price for this material (the cautious choice), from orders, else standing orders."""
+    same = [x for x in demands if x.kind == piece.kind and x.material == piece.material]
+    if same:
+        low = min(same, key=lambda x: x.new_price_per_kg)
+        return low.new_price_per_kg, low.label
+    st = [x for x in standing if x.material == piece.material]
+    return (min(x.new_price_per_kg for x in st), "sample") if st else (None, "sample")
+
+
+def _become(key: str, rid: str) -> dict:
+    if key in IMPORT_KEYS:
+        lane = IMPORT_KEYS[key]
+        res = next((x for x in _own_items(lane) if x.id == rid), None)
+        if res is None:
+            raise HTTPException(404, "no such item")
+        scen = [k for k, v in SC.SCENARIOS.items() if v["engine"] == res.kind]
+        own = True
+    elif key in SC.SCENARIOS:
+        res = next((x for x in SC.dataset(key)["resources"] if x.id == rid), None)
+        if res is None:
+            raise HTTPException(404, "no such item")
+        scen, own = [key], False
+    else:
+        raise HTTPException(404, f"unknown scenario {key}")
+    standing, gp = _gap_standing()
+    merged = None
+    all_demands = []
+    for k in scen:
+        d = SC.dataset(k)
+        all_demands += d["demands"]
+        seller = _own_seller(d) if own else next(x for x in d["sellers"] if x.id == res.seller_id)
+        cands = [BEC.Candidate(x, "order", BEC.order_label(x.buyer_name)) for x in d["demands"]]
+        r = BEC.become(res, seller, cands, d["settings"], d["transport"])
+        if merged is None:
+            merged, first = r, (seller, d)
+        else:
+            merged["options"] += r["options"]
+            merged["refused"] += r["refused"]
+        if merged["scrap"] is None and r["scrap"] is not None:  # use the cluster that has a scrap price for this material
+            merged["scrap"], first = r["scrap"], (seller, d)
+    if res.kind == "flat":  # standing orders and common parts, with the first cluster's seller, settings and transport
+        seller, d = first
+        cands = [BEC.Candidate(BEC.standing_order_demand(o, gp.handling_per_part), "standing", BEC.order_label(o.buyer_name, True),
+                               pickup=gp.pickup) for o in standing]
+        price, label = _reference_price(res, all_demands, standing)
+        cands += BEC.reference_candidates(res, price, label)
+        extra = BEC.become(res, seller, cands, d["settings"], d["transport"])
+        merged["options"] += extra["options"]
+        merged["refused"] += extra["refused"]
+        merged["reference_price_per_kg"] = price
+    merged["options"].sort(key=lambda o: (o["value_above_scrap"] is None, -(o["value_above_scrap"] or 0), o["source"] != "order"))
+    merged.update(key=key, seller_name=OWN_NAME if own else seller.name, own=own,
+                  note="Prices are sample data. Open orders and standing orders are sample orders; common parts have no buyer yet.")
+    if res.kind == "flat":
+        merged["piece"] = {"length_mm": res.length_mm, "width_mm": res.width_mm, "thickness_mm": res.thickness_mm,
+                           "defects": [x.model_dump() for x in res.defects]}
+    elif res.kind == "linear":
+        merged["piece"] = {"length_mm": res.length_mm}
+    return merged
+
+
+@app.get("/api/become/{key}/{rid}")
+def what_it_can_become(key: str, rid: str):
+    """Every order, standing order or common part this one item could become, ranked by value above scrap."""
+    return _become(key, rid)
+
+
+def _plan_svg(b: dict, o: dict) -> str:
+    det = o["detail"]
+    if det.get("shape") == "sheet":
+        L, W = det["length_mm"], det["width_mm"]
+        g = f'<rect x="0" y="0" width="{L}" height="{W}" style="fill:#dfe5ea;stroke:#5d6b77;stroke-width:{max(L, W) / 120}"/>'
+        g += "".join(f'<rect x="{x["x_mm"]}" y="{x["y_mm"]}" width="{x["length_mm"]}" height="{x["width_mm"]}" style="fill:#a1352a;opacity:.5"/>' for x in det.get("defects", []))
+        g += "".join(f'<rect x="{x["x"]}" y="{x["y"]}" width="{x["length"]}" height="{x["width"]}" style="fill:#f3c14b;stroke:#b98400;stroke-width:{max(L, W) / 300}"/>' for x in det["parts"])
+        return f'<svg class="plan" viewBox="0 0 {L} {W}" role="img" aria-label="{len(det["parts"])} parts placed on the piece">{g}</svg>'
+    if det.get("shape") == "bar":
+        L = det["length_mm"]
+        g = f'<rect x="0" y="40" width="{L}" height="60" style="fill:#dfe5ea;stroke:#5d6b77;stroke-width:{L / 200}"/>'
+        g += "".join(f'<rect x="{c["start_mm"]}" y="40" width="{c["length_mm"]}" height="60" style="fill:#f3c14b;stroke:#b98400;stroke-width:{L / 400}"/>' for c in det["cuts"])
+        return f'<svg class="plan" viewBox="0 0 {L} 140" role="img" aria-label="{len(det["cuts"])} cuts along the bar">{g}</svg>'
+    return ""
+
+
+def _become_card(key: str, rid: str) -> str:
+    e = _html.escape
+    try:
+        b = _become(key, rid)
+    except HTTPException:
+        return ""
+    unit = {"flat": "", "linear": "", "perishable": "kg"}[b["kind"]]
+    rows = ""
+    def card(o):
+        val = o["value_above_scrap"]
+        money = ("No new price for this material, so only the count is shown." if val is None else
+                 f'Donation: avoids Rs {-o["scrap_value"]:,.0f} disposal; pickup Rs {o["transport"]:,.0f}.' if o.get("is_donation") else
+                 f'<b class="v {"neg" if val < 0 else ""}">Rs {val:,.0f}</b> {"above" if val >= 0 else "below"} {"disposal" if b["kind"] == "perishable" else "scrap"}')
+        what = (f'{o["units"]:g} kg to {e(o["buyer_name"])}{" (donation)" if o.get("is_donation") else ""}, {o["hours_on_arrival"]:g} h left on arrival'
+                if b["kind"] == "perishable" else f'{o["units"]:g} x {e(o["part_name"])}' + (f' {o["part_mm"][0]:g} x {o["part_mm"][1]:g} mm' if o.get("part_mm") else f' {o.get("cut_length_mm", 0):g} mm'))
+        return (f'<div class="opt">{_plan_svg(b, o) or "<div></div>"}<div><span class="tag {"o" if o["source"] != "reference" else ""}">{e(o["label"])}</span>'
+                f'<p style="margin:6px 0"><b>{what}</b></p><p style="margin:0">{money}</p></div></div>')
+    rows = "".join(card(o) for o in b["options"][:5])
+    if len(b["options"]) > 5:
+        rows += f'<details><summary>More options ({len(b["options"]) - 5})</summary>{"".join(card(o) for o in b["options"][5:])}</details>'
+    if not rows:
+        rows = '<p class="note">Nothing in this lane can use it right now. See the reasons below.</p>'
+    refused = "".join(f'<li><b>{e(r["label"])}: {e(r["part_name"])}</b> {e(r["reason"])}</li>' for r in b["refused"])
+    scrap = b["scrap"]
+    base = (f'Compared with {"disposal" if b["kind"] == "perishable" else "scrap"}: Rs {abs(scrap["value"]):,.0f} '
+            f'at Rs {abs(scrap["price_per_kg"]):g}/kg ({e(scrap["label"])}, {"quoted " + e(scrap["quoted_on"]) if scrap["quoted_on"] else "no date"}).') if scrap else ""
+    return (f'<div class="card"><h2 style="margin:0">What can this become?</h2><p class="note">{e(base)} {e(b["note"])}</p>{rows}'
+            + (f'<details><summary>Not possible ({len(b["refused"])})</summary><ul>{refused}</ul></details>' if refused else "")
+            + '</div>')
