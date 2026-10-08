@@ -440,7 +440,10 @@ def passport(key: str, rid: str, request: Request):
         rows.insert(3, ("Shelf life left", f"{item['hours_left']:g} hours"))
     dl = "".join(f"<dt>{e(a)}</dt><dd>{e(str(b))}</dd>" for a, b in rows)
     qr_url = f"/api/qr.svg?data={_origin(request)}/passport/{key}/{rid}"
-    body = (f'<div class="card"><h1>Offcut passport</h1><p><span class="chip">{e(item["label"])} data</span></p><dl>{dl}</dl></div>'
+    share = (f'<p class="noprint"><a href="/share/{e(key)}/{e(rid)}" target="_blank" rel="noopener" style="display:inline-block;padding:8px 14px;'
+             f'border:1px solid #c4ccd3;border-radius:8px;font-weight:600;color:#17222b;text-decoration:none">Share on WhatsApp</a>'
+             f' <span class="note">Opens WhatsApp with this item\'s details; you choose the chat and press send.</span></p>')
+    body = (f'<div class="card"><h1>Offcut passport</h1><p><span class="chip">{e(item["label"])} data</span></p><dl>{dl}</dl>{share}</div>'
             f'<div class="card"><b>Deal history</b><p class="note">No deals recorded for this item yet. A deal appears here once it is dispatched and confirmed.</p></div>'
             f'<div class="card"><img alt="QR code for this passport" src="{e(qr_url)}" width="140" height="140"><p class="note">Scan to open this passport.</p></div>'
             + _become_card(key, rid)
@@ -1949,8 +1952,8 @@ f.onsubmit=async ev=>{{ev.preventDefault();document.querySelectorAll(".err").for
  if(r.ok){{f.hidden=true;document.getElementById("msg").textContent="Registered: "+t.phone+" for "+t.business+". Alerts will appear on the laptop under Ready to send. You can turn them off anytime.";}}
  else{{const er=(t.detail&&t.detail.errors)||{{}};for(const k in er){{const x=document.getElementById("e-"+k);if(x)x.textContent=er[k];}}document.getElementById("msg").textContent=(t.detail&&t.detail.message)||"Something went wrong. Try again.";}}}};
 </script>"""
-    css = ("label{display:flex;flex-direction:column;gap:4px;font-size:14px;margin:10px 0 2px;color:#5d6b77}"
-           "input:not([type=checkbox]),select{font:inherit;font-size:16px;padding:10px 12px;border:1px solid #c4ccd3;border-radius:8px;background:#fff;color:#17222b}"
+    css = ("[hidden]{display:none!important}label{display:flex;flex-direction:column;gap:4px;font-size:14px;margin:10px 0 2px;color:#5d6b77}"
+           "input:not([type=checkbox]),select{width:100%;box-sizing:border-box;font:inherit;font-size:16px;padding:10px 12px;border:1px solid #c4ccd3;border-radius:8px;background:#fff;color:#17222b}"
            "label.ck{flex-direction:row;align-items:flex-start;gap:10px;color:#17222b;font-size:15px}label.ck input{width:20px;height:20px;margin-top:1px;flex:none}"
            "fieldset{border:1px solid #d9dfe4;border-radius:8px;margin:12px 0 2px;padding:6px 12px 10px}legend{font-size:14px;color:#5d6b77;padding:0 4px}"
            "button{margin-top:14px;width:100%;padding:12px;font-size:16px;background:#f2a33a;border-color:#f2a33a;color:#1f1400}"

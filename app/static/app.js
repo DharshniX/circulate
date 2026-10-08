@@ -16,8 +16,24 @@ async function api(path, body, method, payload) {
     const d = t.detail;
     throw new Error(typeof d === "string" ? d : Array.isArray(d) ? d.map(x => `${(x.loc || []).slice(1).join(".")}: ${x.msg}`).join("; ") : r.statusText);
   }
+  if (opt.method === "POST" && /^\/api\/(deals|requirements|gapfill)/.test(path)) setTimeout(alertsCheck, 0);
   return t;
 }
+/* WhatsApp alerts: the bell counts prepared messages; a toast says when an action prepared new ones. */
+let WA_READY = null;
+async function alertsCheck() {
+  let n;
+  try { n = (await fetch("/api/whatsapp/notifications/count").then(r => r.json())).ready; } catch (e) { return; }
+  const b = $("#bellN"), bell = $("#bell");
+  if (b) { b.hidden = !n; b.textContent = n > 99 ? "99+" : String(n); }
+  if (bell) bell.setAttribute("aria-label", `${n} WhatsApp alert${n === 1 ? "" : "s"} ready to send`);
+  if (WA_READY != null && n > WA_READY && st.view !== "ready") {
+    const k = n - WA_READY;
+    toast(`${k} WhatsApp alert${k === 1 ? "" : "s"} ready to send. <button class="btn sm" type="button" data-go-ready>Open Ready to send</button>`);
+  }
+  WA_READY = n;
+}
+document.addEventListener("click", e => { if (e.target.closest("[data-go-ready]")) go({view: "ready"}); else if (e.target.closest("[data-go-wa]")) go({view: "whatsapp"}); });
 
 /* ---------------- shared building blocks (see DESIGN.md) ---------------- */
 const ic = (name, cls = "") => `<svg class="ic ${cls}" aria-hidden="true"><use href="/static/icons/sprite.svg#i-${name}"/></svg>`;
@@ -118,13 +134,14 @@ const ROLES = {buyer: "Buyer", seller: "Seller", admin: "Admin"};
 // [view, title, icon, lane only]
 const NAV = {
   seller: [["My workshop", [["connect", "Connect your system", "plug"], ["gapfill", "Sold before it's cut", "scissors", "durable"], ["stock", "Stock and passports", "qr-code"], ["offers", "Offers and recovery plan", "route"]]],
-    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]], ["Alerts", [["whatsapp", "WhatsApp alerts", "message-circle"]]]],
+    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]], ["Alerts", [["ready", "Ready to send", "send"], ["whatsapp", "WhatsApp alerts", "message-circle"]]]],
   buyer: [["Marketplace", [["post", "Post a requirement", "file-plus-2"], ["browse", "Browse surplus", "search"], ["match", "Order and match", "layers"]]],
     ["My orders", [["reqs", "My requirements", "clipboard-list"], ["deals", "My deals", "receipt"]]],
-    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]], ["Alerts", [["whatsapp", "WhatsApp alerts", "message-circle"]]]],
-  admin: [["Platform", [["monitor", "Deal monitor", "gauge"], ["quality", "Data quality", "shield-check"], ["prices", "Price references", "banknote"], ["rules", "Rules", "list-checks"], ["sim", "Simulation lab", "flask-conical"]]], ["Alerts", [["whatsapp", "WhatsApp alerts", "message-circle"]]]],
+    ["Logistics", [["pickup", "Pickup and delivery", "truck"]]], ["Alerts", [["ready", "Ready to send", "send"], ["whatsapp", "WhatsApp alerts", "message-circle"]]]],
+  admin: [["Platform", [["monitor", "Deal monitor", "gauge"], ["quality", "Data quality", "shield-check"], ["prices", "Price references", "banknote"], ["rules", "Rules", "list-checks"], ["sim", "Simulation lab", "flask-conical"]]], ["Alerts", [["ready", "Ready to send", "send"], ["whatsapp", "WhatsApp alerts", "message-circle"]]]],
 };
 const TITLES = {
+  ready: ["Ready to send", "WhatsApp alerts CIRCULATE has prepared. Open each one in WhatsApp and press send; nothing goes out by itself."],
   whatsapp: ["WhatsApp alerts", "Register a WhatsApp number and choose the alerts you want. CIRCULATE prepares each message; a person sends it with one click."],
   connect: ["Connect your system", "Bring in your stock from any ERP or billing software. The app checks every row and finds what is surplus."],
   post: ["Post a requirement", "Say what you need. Find it in sellers' stock today, or keep it open so a workshop can cut it from the spare part of its next sheet."],
@@ -647,7 +664,8 @@ async function vConnect(el) {
   let h = `<section class="conns" aria-label="Connectors"><p class="mut">${esc(C.works_with)}</p><div class="conngrid">${C.connectors.map(c => {
       const on = c.status === "active", inner = `<div class="ctrl"><b>${esc(c.name)}</b><div class="grow"></div><span class="pill ${on ? "p-ok" : "p-mut"}">${on ? "Active" : "Planned"}</span></div><p class="note">${esc(c.description)}</p>`;
       return on ? `<button type="button" class="conn" data-goto="conn-${esc(c.key)}">${inner}</button>` : `<div class="conn planned" aria-disabled="true">${inner}</div>`;
-    }).join("")}</div></section>
+    }).join("")}</div>
+    <div class="warow">${ic("message-circle")}<b>WhatsApp</b><span>Alerts prepared automatically, sent with one click: <span class="pill p-ok">Active</span></span><span>Fully automatic sending (WhatsApp Business API): <span class="pill p-mut" title="Shown so you know it is coming. It does not work yet.">Planned</span></span><button class="btn sm ghost" type="button" data-go-wa>Set up WhatsApp alerts</button></div></section>
     ${manualCard(lane, O)}
     <div class="card" id="conn-csv_upload"><div class="ctrl"><h2>Import from ERP or POS export (CSV)</h2><div class="grow"></div><a class="btn" href="/api/import/example/${lane}" download>Download example file</a></div>
     <p class="mut">There is no live link to any outside software. Export your ${durable ? "sheet and offcut" : "food"} stock list as a CSV file from the system you use, then upload it here. Nothing is saved until you list items on the marketplace.</p>
@@ -966,14 +984,14 @@ async function vStock(el) {
   const total = items.reduce((a, x) => a + x.scrap_value, 0), kg = items.reduce((a, x) => a + x.kg, 0);
   let h = `<div class="card"><div class="ctrl">${await scenSeg()}<label class="field">Seller<select id="sf"><option value="">All sellers</option>${S.data.sellers.map(s => `<option value="${esc(s.id)}" ${s.id === st.sellerFilter ? "selected" : ""}>${esc(s.name)}</option>`).join("")}</select></label><div class="grow"></div><a class="btn" href="/labels/${k}" target="_blank" rel="noopener">Print QR labels</a></div></div>`;
   h += `<div class="tiles"><div class="tile"><b>${items.length}</b><span>${fresh ? "Lots" : "Pieces"} in stock</span></div><div class="tile"><b>${num(kg, 0)} kg</b><span>Total weight</span></div><div class="tile"><b>${inr(total)}</b><span>${fresh ? "Disposal value (negative = a cost)" : "Worth as scrap today"}</span></div>${fresh ? `<div class="tile hi"><b>${items.filter(x => x.hours_left < 12).length}</b><span>Lots with under 12 hours left</span></div>` : ""}</div>`;
-  h += `<div class="card"><h2>${fresh ? "Lots, most urgent first" : "Pieces"}</h2>${items.length ? `<div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th>${fresh ? "<th>Shelf life left</th>" : ""}<th class="n">kg</th><th class="n">${fresh ? "Disposal" : "Scrap value"}</th><th>Data</th></tr>${items.map(x => {
+  h += `<div class="card"><h2>${fresh ? "Lots, most urgent first" : "Pieces"}</h2>${items.length ? `<div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th>${fresh ? "<th>Shelf life left</th>" : ""}<th class="n">kg</th><th class="n">${fresh ? "Disposal" : "Scrap value"}</th><th>Data</th><th class="noprint"></th></tr>${items.map(x => {
     const url = location.origin + x.passport;
-    return `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(url)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td>${fresh ? `<td style="min-width:140px"><div class="bar ${x.hours_left < 12 ? "warn" : "pe"}"><i style="width:${Math.max(3, Math.min(1, x.hours_left / maxH) * 100)}%"></i></div><span class="note">${num(x.hours_left)} h</span></td>` : ""}<td class="n">${num(x.kg, 1)}</td><td class="n">${inr(x.scrap_value)}</td><td>${chip(x.label)}</td></tr>`;
+    return `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(url)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td>${fresh ? `<td style="min-width:140px"><div class="bar ${x.hours_left < 12 ? "warn" : "pe"}"><i style="width:${Math.max(3, Math.min(1, x.hours_left / maxH) * 100)}%"></i></div><span class="note">${num(x.hours_left)} h</span></td>` : ""}<td class="n">${num(x.kg, 1)}</td><td class="n">${inr(x.scrap_value)}</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/${k}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`;
   }).join("")}</table></div>` : `<div class="empty">No stock for this seller.</div>`}
   <p class="note">Each QR opens the item's passport on this computer's address. For phones on the same Wi-Fi, open the app at the laptop's network address (see README) before printing labels.</p></div>`;
   if (imp.items.length) h = `<div class="card"><div class="ctrl"><h2>Listed from your import (${imp.items.length})</h2><div class="grow"></div><a class="btn" href="/labels/import_${st.lane}" target="_blank" rel="noopener">Print QR labels</a><button class="btn" id="impClear" type="button">Remove imported stock</button></div>
     <p class="mut">Listed from Connect your system: a CSV import, the auto-sync folder, or an item added by hand.</p>
-    <div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th><th>Found by</th><th class="n">kg</th><th class="n">Scrap value</th><th>Data</th></tr>${imp.items.map(x => `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(location.origin + x.passport)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td><td class="n">${num(x.kg, 1)}</td><td class="n">–</td><td>${chip(x.label)}</td></tr>`).join("")}</table></div>
+    <div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th><th>Found by</th><th class="n">kg</th><th class="n">Scrap value</th><th>Data</th><th class="noprint"></th></tr>${imp.items.map(x => `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(location.origin + x.passport)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td><td class="n">${num(x.kg, 1)}</td><td class="n">–</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/import_${st.lane}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`).join("")}</table></div>
     <p class="note">No scrap price is shown for imported items until a dated quote is entered.</p></div>` + h;
   el.innerHTML = h;
   bindScen(el);
@@ -1119,6 +1137,45 @@ async function vSim(el) {
   <div class="card"><h2>Assumptions</h2><div class="scroll"><table><tr><th>Input</th><th>Value</th><th>Status</th></tr><tr><td>Sheet, kerf, edge margin</td><td>2500 × 1250 mm, 3 mm, 10 mm</td><td>Typical</td></tr><tr><td>New plate / scrap</td><td>₹65/kg / ₹32/kg</td><td>${chip("assumption")}</td></tr><tr><td>Handling, cutting, pickup</td><td>₹2 per part, ₹6 per m, ₹300 per run</td><td>${chip("assumption")}</td></tr><tr><td>Demand</td><td>13 part types, five demand levels</td><td>${chip("sample")}</td></tr></table></div><p class="note">Source: research/gap_fill_sim.py. Run it again with real prices to update these figures.</p></div>`;
 }
 
+/* ---------------- Ready to send: prepared WhatsApp alerts, sent by a person with one click ---------------- */
+const WA_STATUS_PILL = {ready: "p-np", opened: "p-mut", sent: "p-ok", skipped: "p-mut"};
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch (e) { /* plain http on a LAN address: fall back */ }
+  const ta = document.createElement("textarea"); ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.select(); const ok = document.execCommand("copy"); ta.remove(); return ok;
+}
+async function vReady(el) {
+  const r = await api("/api/whatsapp/notifications"), all = r.notifications, F = st.readyFilter || "ready";
+  const list = F === "all" ? all : all.filter(n => n.status === "ready");
+  const when = iso => new Date(iso).toLocaleString("en-IN", {day: "numeric", month: "short", hour: "2-digit", minute: "2-digit"});
+  const card = n => `<article class="wa-card" data-n="${n.id}"><div class="wa-head"><span class="wa-ic">${ic("message-circle")}</span>
+      <div class="nm"><b>${esc(n.to.name)}</b><span class="note">${esc(n.to.business)}${n.to.phone ? ` · <span class="num">${esc(n.to.phone)}</span>` : ""}</span></div>
+      <div class="ctrl" style="gap:6px"><span class="pill p-mut">${esc(n.event_text)}</span><span class="pill ${WA_STATUS_PILL[n.status]}">${esc(n.status_text)}</span></div></div>
+    <blockquote class="wa-text">${esc(n.text)}</blockquote>
+    <div class="wa-act"><a class="btn np" href="${esc(n.link)}" target="_blank" rel="noopener" data-wa-open="${n.id}">${ic("send", "sm")}Send on WhatsApp</a>
+      <button class="btn" type="button" data-wa-sent="${n.id}" ${n.status === "sent" ? "disabled" : ""}>${ic("circle-check", "sm")}Mark as sent</button>
+      <button class="btn" type="button" data-wa-copy="${n.id}">${ic("copy", "sm")}Copy message</button>
+      ${n.status === "ready" ? `<button class="btn ghost" type="button" data-wa-skip="${n.id}">Skip</button>` : ""}
+      <span class="note grow">Prepared ${when(n.created_at)}${n.opened_at ? ` · opened ${when(n.opened_at)}` : ""}${n.sent_at ? ` · marked as sent ${when(n.sent_at)}` : ""}</span></div></article>`;
+  const ready = all.filter(n => n.status === "ready").length;
+  let h = `<div class="ctrl"><span class="seg" role="group" aria-label="Show"><button type="button" data-rf="ready" aria-pressed="${F === "ready"}">Ready (${ready})</button><button type="button" data-rf="all" aria-pressed="${F === "all"}">All (${all.length})</button></span><div class="grow"></div>
+      <span class="note" style="max-width:62ch">Nothing is sent until a person presses send in WhatsApp. CIRCULATE cannot see whether a message was delivered or read, so a status only records what you did.</span></div>`;
+  if (!all.length) h += emptyState("send", "No alerts yet. Register a number in WhatsApp alerts, then post a requirement or run Sold before it's cut.", `<button class="btn pri" type="button" id="toWa">${ic("message-circle")}Register a number</button>`);
+  else if (!list.length) h += emptyState("circle-check", "Nothing left to send. Every alert has been opened, marked as sent or skipped.", `<button class="btn" type="button" data-rf="all">Show all alerts</button>`);
+  else h += `<div class="wa-list">${list.map(card).join("")}</div>`;
+  el.innerHTML = h;
+  const tw = $("#toWa", el); if (tw) tw.onclick = () => go({view: "whatsapp"});
+  el.querySelectorAll("[data-rf]").forEach(b => b.onclick = () => { st.readyFilter = b.dataset.rf; render(); });
+  const set = async (id, status, msg) => { await api(`/api/whatsapp/notifications/${id}/status`, {status}); if (msg) toast(msg); render(); };
+  el.querySelectorAll("[data-wa-open]").forEach(a => a.addEventListener("click", () => setTimeout(() => set(a.dataset.waOpen, "opened", "Opened in WhatsApp. Press send there, then come back and mark it as sent."), 300)));
+  el.querySelectorAll("[data-wa-sent]").forEach(b => b.onclick = () => set(b.dataset.waSent, "sent", "Marked as sent by you."));
+  el.querySelectorAll("[data-wa-skip]").forEach(b => b.onclick = () => set(b.dataset.waSkip, "skipped", "Skipped. It stays under All."));
+  el.querySelectorAll("[data-wa-copy]").forEach(b => b.onclick = async () => {
+    const n = all.find(x => x.id === +b.dataset.waCopy);
+    toast(await copyText(n.text) ? "Message copied. Paste it into any chat." : "Could not copy. Select the text and copy it by hand.", "ok");
+  });
+}
+
 /* ---------------- WhatsApp alerts: register numbers (no automatic sending) ---------------- */
 const WA_ROLES = {seller: ["seller"], buyer: ["buyer", "food bank"], admin: null};
 async function vWhatsapp(el) {
@@ -1213,7 +1270,7 @@ async function vWelcome(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {welcome: vWelcome, whatsapp: vWhatsapp, post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {welcome: vWelcome, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, connect: vConnect, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();
@@ -1233,6 +1290,7 @@ async function render() {
   main.appendChild(body);
   document.title = welcome ? "CIRCULATE · Surplus, sold before it becomes scrap" : `${t} · CIRCULATE`;
   if (fresh) window.scrollTo(0, 0);
+  alertsCheck();
 }
 readHash();
 if (st.view !== "welcome") history.replaceState(null, "", `#${st.role}/${st.view}/${st.lane}`);
