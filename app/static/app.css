@@ -537,3 +537,4 @@ main.entry-main>.entry-head{flex-direction:row;max-width:none;justify-content:ce
 .addcard .btn{align-self:flex-start}.addcard p{min-height:3em}
 .gostock{border-color:var(--ok)}
 @media(max-width:1100px){.addgrid{grid-template-columns:minmax(0,1fr)}}
+.mode-bar{padding:4px var(--s2);background:var(--warnbg);color:var(--warn);font-size:var(--fs-12);text-align:center;border-bottom:1px solid var(--line)}

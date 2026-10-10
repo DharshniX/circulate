@@ -203,6 +203,10 @@ function shell() {
   $("#who").innerHTML = `<span class="who-av" aria-hidden="true">${esc(S.initial)}</span><span class="who-t"><b title="${esc(S.business_name)}">${esc(S.short_name)}</b><span class="pill role-${S.role}">${esc(S.role_name)}</span></span>`
     + (S.accounts ? `<label class="viewas-pick"><span class="vh">View as</span><select id="viewAs" aria-label="View the app as a demo business"><option value="">View as…</option>${S.accounts.map(a => `<option value="${esc(a.business_id)}" ${S.viewing_as && a.business_id === S.business_id ? "selected" : ""}>${esc(a.name)} · ${esc(a.role_name)}</option>`).join("")}</select></label>` : "")
     + `<button class="btn sm ghost" type="button" id="logout">Log out</button>`;
+  let mode = $("#modeBar");
+  if (!mode) { mode = document.createElement("div"); mode.id = "modeBar"; mode.className = "mode-bar"; mode.setAttribute("role", "status"); $(".work").prepend(mode); }
+  mode.hidden = S.auth_mode !== "demo";
+  mode.textContent = "Demo login mode: one-tap sign-in is switched on. Set AUTH_MODE=real to require passwords.";
   const bar = $("#viewasBar");
   bar.hidden = !S.viewing_as;
   if (S.viewing_as) bar.innerHTML = `${ic("eye", "sm")}<span>Viewing as <b>${esc(S.business_name)}</b></span><button type="button" id="exitView">Exit</button>`;

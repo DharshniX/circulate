@@ -5,3 +5,4 @@ __pycache__/
 uploads/
 erp_drop/
 _claude_tmp/
+.secret_key

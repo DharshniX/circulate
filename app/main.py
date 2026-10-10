@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import io
 import json
+import secrets
 import re
 import sqlite3
 import asyncio
@@ -45,7 +46,10 @@ DB = ROOT.parent / "circulate.db"
 
 @asynccontextmanager
 async def lifespan(_app):
-    """Start the auto-sync folder checker with the server (set CIRCULATE_AUTOSYNC=0 to switch it off)."""
+    """Seed the accounts, then start the auto-sync folder checker (set CIRCULATE_AUTOSYNC=0 to switch it off)."""
+    _SEEDED.discard(str(DB))
+    with closing(db()):  # seeding runs on every startup; it is idempotent and never overwrites a password
+        pass
     task = asyncio.create_task(_autosync_loop()) if os.environ.get("CIRCULATE_AUTOSYNC", "1") != "0" else None
     yield
     if task:
@@ -54,6 +58,9 @@ async def lifespan(_app):
 
 app = FastAPI(title="CIRCULATE", version="0.2", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
+
+
+_SEEDED: set[str] = set()
 
 
 def db():
@@ -68,6 +75,13 @@ def db():
     for col, typ in (("scenario", "TEXT"), ("rate_multiplier", "REAL"), ("booking", "TEXT")):
         if col not in have:  # older databases: add the column, keep every row
             con.execute(f"ALTER TABLE deals ADD COLUMN {col} {typ}")
+    con.execute("""CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, seller_type TEXT, business_id TEXT, business_name TEXT, contact_name TEXT,
+        email TEXT UNIQUE, phone TEXT, area TEXT, lane TEXT, password_hash TEXT, salt TEXT, token_version INTEGER DEFAULT 0,
+        active INTEGER DEFAULT 1, created_at TEXT, last_login_at TEXT)""")
+    if str(DB) not in _SEEDED:
+        _SEEDED.add(str(DB))
+        _seed_users(con)
     con.execute("""CREATE TABLE IF NOT EXISTS requirements (
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, lane TEXT, kind TEXT, scenario TEXT, demand TEXT,
         needed_by TEXT, standing INTEGER, status TEXT, deal_id INTEGER, history TEXT)""")
@@ -2055,36 +2069,128 @@ def _owner(view: str) -> str:
     return "admin"
 
 
+# ---------------- Accounts: real sign-in, with a demo switch for emergencies ----------------
+import logging
+import re as _re
+
+from app import auth as AUTH
+
+log = logging.getLogger("circulate")
+SESSION_COOKIE = "circ_session"
+OLD_COOKIE = "circulate_session"
+THROTTLE = AUTH.Throttle()
+SELLER_TYPES = {"workshop": "Workshop", "construction_site": "Construction site", "shop": "Shop", "kitchen": "Kitchen"}
+LOGIN_ERROR = "That email and password do not match an account. Check them and try again."
+DEMO_USERS = [  # email, business id (from engine/scenarios.py), role, seller type
+    ("sriram@demo.circulate", "steel:A", "seller", "workshop"),
+    ("thamarai@demo.circulate", "food:H", "seller", "kitchen"),
+    ("ezhil@demo.circulate", "steel:W", "buyer", None),
+    ("anna@demo.circulate", "food:M", "buyer", None),
+    ("thozhan@demo.circulate", "food:N", "buyer", None),
+]
+_HASH_CACHE: dict[tuple[str, str], tuple[str, str]] = {}  # (email, password) -> (salt, hash): seeding a new database stays fast
+
+
+def auth_mode() -> str:
+    """AUTH_MODE=real (default) needs email and password. AUTH_MODE=demo restores the one-tap demo login for emergencies."""
+    return "demo" if os.environ.get("AUTH_MODE", "real").strip().lower() == "demo" else "real"
+
+
+def _on_server() -> bool:
+    return bool(os.environ.get("RENDER") or os.environ.get("CIRCULATE_ON_SERVER"))
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _seed_users(con) -> None:
+    """Idempotent: creates the admin and the demo accounts if their email is missing; never changes an existing password."""
+    have = {r[0] for r in con.execute("SELECT email FROM users")}
+    demo_pw = os.environ.get("DEMO_PASSWORD") or "Circulate@2026"
+    rows = []
+    admin_email = (os.environ.get("ADMIN_EMAIL") or "admin@circulate.local").strip().lower()
+    if admin_email not in have:
+        pw = os.environ.get("ADMIN_PASSWORD")
+        if not pw and _on_server():
+            log.warning("No ADMIN_PASSWORD set: no admin account was created. Set ADMIN_EMAIL and ADMIN_PASSWORD and restart.")
+        else:
+            if not pw:
+                pw = secrets.token_urlsafe(12)
+                print(f"\n  CIRCULATE admin account created (shown once):\n    email:    {admin_email}\n    password: {pw}\n"
+                      "  Set ADMIN_PASSWORD to choose your own.\n", flush=True)
+            rows.append(("admin", None, "admin", "CIRCULATE Admin", "CIRCULATE team", admin_email, "", "CIRCULATE team", "durable", pw))
+    for email, bid, role, stype in DEMO_USERS:
+        if email in have:
+            continue
+        a = _demo_accounts()[bid]
+        rows.append((role, stype, bid, a["name"], "Demo contact", email, "", a["area"], a["lane"], demo_pw))
+    for role, stype, bid, name, contact, email, phone, area, lane, pw in rows:
+        if (email, pw) not in _HASH_CACHE:
+            _HASH_CACHE[(email, pw)] = AUTH.hash_password(pw)
+        salt, h = _HASH_CACHE[(email, pw)]
+        con.execute("INSERT OR IGNORE INTO users (role, seller_type, business_id, business_name, contact_name, email, phone, area, lane,"
+                    " password_hash, salt, token_version, active, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,1,?)",
+                    (role, stype, bid, name, contact, email, phone, area, lane, h, salt, _now()))
+    con.commit()
+
+
+def _key() -> bytes:
+    return AUTH.secret_key(ROOT.parent)
+
+
+def _user(where: str, *args):
+    with closing(db()) as con:
+        return con.execute(f"SELECT * FROM users WHERE {where}", args).fetchone()
+
+
+def _account(u) -> dict:
+    """The fields the app uses for a business: demo businesses keep their scenario links (stock, orders); new ones start empty."""
+    a = dict(_demo_accounts().get(u["business_id"], {}))
+    a.update(business_id=u["business_id"], role=u["role"], name=u["business_name"], lane=u["lane"] or "durable",
+             area=u["area"] or "", seller_type=u["seller_type"], user_id=u["id"], email=u["email"], contact_name=u["contact_name"],
+             phone=u["phone"] or "")
+    a.setdefault("contact_role", "seller" if u["role"] == "seller" else "buyer")
+    a["short_name"] = a["name"].split(", ")[0]
+    a["initial"] = (a["short_name"][:1] or "?").upper()
+    return a
+
+
 def _session(request: Request) -> dict | None:
-    """{real: account, view: account or None}. Anything that does not match a demo account counts as signed out."""
-    raw = request.cookies.get(SESSION_COOKIE) or ""
-    parts = raw.split("|")
-    if len(parts) < 2:
+    """{real: account, view: account or None, user: row}. A bad, expired or out-of-date cookie counts as signed out."""
+    tok = AUTH.read_token(_key(), request.cookies.get(SESSION_COOKIE))
+    if tok is None:
         return None
-    acc = _demo_accounts()
-    real = acc.get(parts[1])
-    if real is None or real["role"] != parts[0]:
+    u = _user("id=?", tok["user_id"])
+    if u is None or not u["active"] or u["token_version"] != tok["token_version"]:
         return None
-    view = acc.get(parts[2]) if len(parts) > 2 and parts[2] and real["role"] == "admin" else None
-    return {"real": real, "view": view if view and view["role"] != "admin" else None}
+    view = None
+    if u["role"] == "admin" and tok["view"]:
+        v = _user("business_id=? AND active=1", tok["view"])
+        view = _account(v) if v is not None and v["role"] != "admin" else None
+    return {"real": _account(u), "view": view, "user": u}
 
 
 def _session_out(sess: dict) -> dict:
     a = sess["view"] or sess["real"]
     lane_items = [i for g in _menu(a["role"]) for i in g["items"] if not i["lane"] or i["lane"] == a["lane"]]
-    out = {**{k: v for k, v in a.items()}, "business_name": a["name"], "role_name": ROLE_NAMES[a["role"]], "menu": _menu(a["role"]),
-           "views": _views(a["role"]), "home": lane_items[0]["view"], "viewing_as": sess["view"] is not None,
-           "owners": {v: {"role": _owner(v), "for": ROLE_FOR[_owner(v)]} for v in _views("admin")}}
+    out = {**{k: v for k, v in a.items() if k != "user_id"}, "business_name": a["name"], "role_name": ROLE_NAMES[a["role"]],
+           "menu": _menu(a["role"]), "views": _views(a["role"]), "home": lane_items[0]["view"], "viewing_as": sess["view"] is not None,
+           "owners": {v: {"role": _owner(v), "for": ROLE_FOR[_owner(v)]} for v in _views("admin")}, "auth_mode": auth_mode()}
     if sess["real"]["role"] == "admin":  # the "View as" menu
-        out["real"] = {"business_id": "admin", "business_name": sess["real"]["name"], "role": "admin"}
-        out["accounts"] = [{"business_id": x["business_id"], "name": x["name"], "role": x["role"], "role_name": ROLE_NAMES[x["role"]],
-                            "area": x["area"], "lane": x["lane"]}
-                           for x in _demo_accounts().values()]
+        out["real"] = {"business_id": sess["real"]["business_id"], "business_name": sess["real"]["name"], "role": "admin"}
+        with closing(db()) as con:
+            users = con.execute("SELECT * FROM users WHERE active=1 ORDER BY role='admin' DESC, id").fetchall()
+        out["accounts"] = [{"business_id": x["business_id"], "name": x["business_name"], "role": x["role"], "role_name": ROLE_NAMES[x["role"]],
+                            "area": x["area"] or "", "lane": x["lane"]} for x in users]
     return out
 
 
-def _set_session(response: Response, role: str, business_id: str, view: str = ""):
-    response.set_cookie(SESSION_COOKIE, f"{role}|{business_id}|{view}", httponly=True, samesite="lax", max_age=12 * 3600, path="/")
+def _issue(request: Request, response: Response, u, view: str = "") -> None:
+    secure = request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
+    response.set_cookie(SESSION_COOKIE, AUTH.make_token(_key(), u["id"], u["token_version"], view), httponly=True, samesite="lax",
+                        secure=secure, max_age=AUTH.SESSION_DAYS * 86400, path="/")
+    response.delete_cookie(OLD_COOKIE, path="/")
 
 
 class SessionIn(BaseModel):
@@ -2096,41 +2202,168 @@ class ViewAsIn(BaseModel):
     business_id: str
 
 
+class LoginIn(BaseModel):
+    email: str = ""
+    password: str = ""
+    role: Literal["seller", "buyer", "admin"] | None = None
+
+
+class RegisterIn(BaseModel):
+    role: str = ""
+    seller_type: str | None = None
+    business_name: str = ""
+    contact_name: str = ""
+    email: str = ""
+    phone: str = ""
+    area: str = ""
+    lane: str = ""
+    password: str = ""
+    confirm: str = ""
+
+
+class PasswordIn(BaseModel):
+    current: str = ""
+    new: str = ""
+    confirm: str | None = None
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 @app.get("/api/session")
 def get_session(request: Request):
     sess = _session(request)
     if sess is None:
-        raise HTTPException(401, "Not signed in. Choose a demo account on the start page.")
+        raise HTTPException(401, "Not signed in. Sign in on the start page.")
     return _session_out(sess)
 
 
 @app.post("/api/session")
-def start_session(s: SessionIn, response: Response):
-    a = _demo_accounts().get(s.business_id)
-    if a is None or a["role"] != s.role:
+def start_session(s: SessionIn, request: Request, response: Response):
+    """The old one-tap demo login. Works only when AUTH_MODE=demo (an emergency switch)."""
+    if auth_mode() != "demo":
+        raise HTTPException(403, "One-tap demo login is switched off. Sign in with your email and password.")
+    u = _user("business_id=? AND role=? AND active=1", s.business_id, s.role)
+    if u is None:
         raise HTTPException(422, "Choose one of the demo accounts for this role.")
-    _set_session(response, s.role, s.business_id)
-    return _session_out({"real": a, "view": None})
+    _issue(request, response, u)
+    return _session_out({"real": _account(u), "view": None, "user": u})
 
 
 @app.delete("/api/session")
 def end_session(response: Response):
     response.delete_cookie(SESSION_COOKIE, path="/")
+    response.delete_cookie(OLD_COOKIE, path="/")
     return {"signed_out": True}
+
+
+@app.post("/api/auth/login")
+def login(body: LoginIn, request: Request, response: Response):
+    email = body.email.strip().lower()
+    wait = THROTTLE.wait(email)
+    if wait:
+        raise HTTPException(429, f"Too many attempts for this email. Try again in {max(1, round(wait / 60))} minute(s).")
+    u = _user("email=?", email) if email else None
+    ok = AUTH.verify_password(body.password, u["salt"], u["password_hash"]) if u is not None else (AUTH.burn_time(body.password) or False)
+    if not ok:
+        THROTTLE.fail(email)
+        raise HTTPException(401, LOGIN_ERROR)  # the same words for an unknown email and a wrong password
+    THROTTLE.success(email)
+    if not u["active"]:
+        raise HTTPException(403, "This account is switched off. Ask the CIRCULATE admin to turn it back on.")
+    if body.role and body.role != u["role"]:
+        raise HTTPException(403, f"This is a {ROLE_NAMES[u['role']].lower()} account. Use the {ROLE_NAMES[u['role']].lower()} sign-in.")
+    with closing(db()) as con, con:
+        con.execute("UPDATE users SET last_login_at=? WHERE id=?", (_now(), u["id"]))
+    _issue(request, response, u)
+    return _session_out({"real": _account(u), "view": None, "user": u})
+
+
+@app.post("/api/auth/logout")
+def logout(response: Response):
+    return end_session(response)
+
+
+_EMAIL = _re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@app.post("/api/auth/register")
+def register(r: RegisterIn, request: Request, response: Response):
+    """Sellers and buyers create their own account. Admin accounts cannot be registered."""
+    e = {}
+    if r.role not in ("seller", "buyer"):
+        e["role"] = "Choose seller or buyer. Admin accounts cannot be created here."
+    if r.role == "seller" and r.seller_type not in SELLER_TYPES:
+        e["seller_type"] = "Choose what kind of seller you are."
+    for k, label in (("business_name", "your business name"), ("contact_name", "your name"), ("area", "your area")):
+        if not getattr(r, k).strip():
+            e[k] = f"Enter {label}."
+    email = r.email.strip().lower()
+    if not _EMAIL.match(email):
+        e["email"] = "Enter an email address like name@business.in."
+    elif _user("email=?", email) is not None:
+        e["email"] = "An account with this email already exists. Sign in instead."
+    phone = _re.sub(r"[\s\-+()]", "", r.phone)
+    if phone.startswith("91") and len(phone) == 12:
+        phone = phone[2:]
+    if not (phone.isdigit() and len(phone) == 10):
+        e["phone"] = "Enter a 10-digit mobile number."
+    if r.lane not in ("durable", "fresh"):
+        e["lane"] = "Choose Durable or Fresh."
+    if len(r.password) < AUTH.MIN_PASSWORD:
+        e["password"] = f"Use at least {AUTH.MIN_PASSWORD} characters."
+    elif r.password != r.confirm:
+        e["confirm"] = "The two passwords do not match."
+    if e:
+        raise HTTPException(422, {"message": "Some fields need fixing.", "errors": e})
+    salt, h = AUTH.hash_password(r.password)
+    with closing(db()) as con, con:
+        cur = con.execute("INSERT INTO users (role, seller_type, business_id, business_name, contact_name, email, phone, area, lane,"
+                          " password_hash, salt, token_version, active, created_at, last_login_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,0,1,?,?)",
+                          (r.role, r.seller_type if r.role == "seller" else None, "", r.business_name.strip(), r.contact_name.strip(),
+                           email, phone, r.area.strip(), r.lane, h, salt, _now(), _now()))
+        con.execute("UPDATE users SET business_id=? WHERE id=?", (f"u{cur.lastrowid}", cur.lastrowid))
+    u = _user("email=?", email)
+    _issue(request, response, u)
+    return _session_out({"real": _account(u), "view": None, "user": u})
+
+
+@app.post("/api/auth/change-password")
+def change_password(b: PasswordIn, request: Request, response: Response):
+    sess = _session(request)
+    if sess is None:
+        raise HTTPException(401, "Not signed in.")
+    u = sess["user"]
+    e = {}
+    if not AUTH.verify_password(b.current, u["salt"], u["password_hash"]):
+        e["current"] = "Your current password is not right."
+    if len(b.new) < AUTH.MIN_PASSWORD:
+        e["new"] = f"Use at least {AUTH.MIN_PASSWORD} characters."
+    elif b.confirm is not None and b.confirm != b.new:
+        e["confirm"] = "The two passwords do not match."
+    if e:
+        raise HTTPException(422, {"message": "Some fields need fixing.", "errors": e})
+    salt, h = AUTH.hash_password(b.new)
+    with closing(db()) as con, con:
+        con.execute("UPDATE users SET password_hash=?, salt=?, token_version=token_version+1 WHERE id=?", (h, salt, u["id"]))
+    _issue(request, response, _user("id=?", u["id"]))  # this browser stays signed in; every other cookie stops working
+    return {"changed": True}
 
 
 @app.post("/api/session/view-as")
 def view_as(v: ViewAsIn, request: Request, response: Response):
-    """Admin only: see the app exactly as one demo business does, for a live demo."""
+    """Admin only: see the app exactly as one business does, for a live demo."""
     sess = _session(request)
     if sess is None or sess["real"]["role"] != "admin":
         raise HTTPException(403, "Only the CIRCULATE admin can view the app as another business.")
-    target = _demo_accounts().get(v.business_id)
-    if target is None:
-        raise HTTPException(422, "Choose one of the demo businesses.")
-    view = "" if target["role"] == "admin" else target["business_id"]
-    _set_session(response, "admin", "admin", view)
-    return _session_out({"real": sess["real"], "view": None if not view else target})
+    t = _user("business_id=? AND active=1", v.business_id)
+    if t is None:
+        raise HTTPException(422, "Choose one of the businesses in the list.")
+    view = "" if t["role"] == "admin" else t["business_id"]
+    _issue(request, response, sess["user"], view)
+    return _session_out({"real": sess["real"], "view": _account(t) if view else None, "user": sess["user"]})
 
 
 @app.delete("/api/session/view-as")
@@ -2138,8 +2371,8 @@ def exit_view_as(request: Request, response: Response):
     sess = _session(request)
     if sess is None or sess["real"]["role"] != "admin":
         raise HTTPException(403, "Only the CIRCULATE admin can view the app as another business.")
-    _set_session(response, "admin", "admin")
-    return _session_out({"real": sess["real"], "view": None})
+    _issue(request, response, sess["user"])
+    return _session_out({"real": sess["real"], "view": None, "user": sess["user"]})
 
 
 _MARK = ('<svg class="mark" viewBox="0 0 32 32" aria-hidden="true"><rect x="2" y="7" width="13" height="18" rx="2" fill="none" stroke="currentColor" stroke-width="2"/>'

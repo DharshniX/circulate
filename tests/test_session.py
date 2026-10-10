@@ -1,7 +1,8 @@
-"""Demo logins: separate seller, buyer and admin sessions. Demo only: the APIs themselves stay open by design."""
+"""Sessions per role: what each signed-in seller, buyer and admin sees. Clients sign in with email and password."""
 from fastapi.testclient import TestClient
 
 from app.main import app
+from conftest import sign_in
 
 SELLER = {"gapfill", "stock", "add", "add-csv", "add-sync", "add-manual", "deals", "pickup", "whatsapp"}
 BUYER = {"browse", "post", "reqs", "match", "pickup", "whatsapp"}
@@ -9,16 +10,15 @@ BUYER = {"browse", "post", "reqs", "match", "pickup", "whatsapp"}
 
 def client(role=None, business_id=None):
     c = TestClient(app)
-    if role:
-        assert c.post("/api/session", json={"role": role, "business_id": business_id}).status_code == 200
-    return c
+    return sign_in(c, "admin" if role == "admin" else business_id) if role else c
 
 
 def menu_views(s):
     return {i["view"] for g in s["menu"] for i in g["items"]}
 
 
-def test_session_set_get_delete():
+def test_session_set_get_delete(monkeypatch):
+    monkeypatch.setenv("AUTH_MODE", "demo")  # the one-tap demo login (emergency switch)
     c = client()
     assert c.get("/api/session").status_code == 401
     r = c.post("/api/session", json={"role": "seller", "business_id": "steel:A"})
@@ -30,12 +30,13 @@ def test_session_set_get_delete():
     assert c.get("/api/session").status_code == 401
 
 
-def test_only_demo_accounts_and_matching_roles():
+def test_only_demo_accounts_and_matching_roles(monkeypatch):
+    monkeypatch.setenv("AUTH_MODE", "demo")
     c = client()
     assert c.post("/api/session", json={"role": "buyer", "business_id": "steel:A"}).status_code == 422  # a seller, not a buyer
     assert c.post("/api/session", json={"role": "seller", "business_id": "steel:Z"}).status_code == 422
     assert c.post("/api/session", json={"role": "owner", "business_id": "admin"}).status_code == 422
-    c.cookies.set("circulate_session", "admin|steel:A|")  # a cookie that matches no account counts as signed out
+    c.cookies.set("circ_session", "1|0|9999999999||forged")  # an unsigned cookie counts as signed out
     assert c.get("/api/session").status_code == 401
 
 

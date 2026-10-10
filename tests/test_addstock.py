@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 
 PAGES = {"/seller/add": "add", "/seller/add/csv": "add-csv", "/seller/add/sync": "add-sync", "/seller/add/manual": "add-manual"}
 CSV = "item_id,seller_id,material,length_mm,width_mm,thickness_mm,grade,condition,is_full_sheet,days_unused\nP1,A,mild_steel,800,400,3,E250,good,false,5\n"
@@ -16,9 +17,7 @@ def temp_storage(tmp_path, monkeypatch):
 
 
 def signed(role, business):
-    c = TestClient(main.app)
-    assert c.post("/api/session", json={"role": role, "business_id": business}).status_code == 200
-    return c
+    return sign_in(TestClient(main.app), business)
 
 
 def test_each_url_opens_its_page_for_a_seller():
