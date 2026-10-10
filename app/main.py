@@ -2019,7 +2019,7 @@ ROLE_MENUS = {
                             ("prices", "Price references", "banknote", None), ("rules", "Rules", "list-checks", None), ("users", "All users", "users", None)]),
               ("Alerts", [("ready", "Ready to send", "send", None), ("whatsapp", "WhatsApp alerts", "message-circle", None)])],
 }
-EVERY_ROLE_VIEWS = ["ready"]  # the bell opens "Ready to send" in every role
+EVERY_ROLE_VIEWS = ["ready", "account"]  # the bell opens "Ready to send"; the business name opens Account
 
 
 @functools.lru_cache(maxsize=1)
@@ -2178,7 +2178,7 @@ def _session_out(sess: dict) -> dict:
            "menu": _menu(a["role"]), "views": _views(a["role"]), "home": lane_items[0]["view"], "viewing_as": sess["view"] is not None,
            "owners": {v: {"role": _owner(v), "for": ROLE_FOR[_owner(v)]} for v in _views("admin")}, "auth_mode": auth_mode()}
     if sess["real"]["role"] == "admin":  # the "View as" menu
-        out["real"] = {"business_id": sess["real"]["business_id"], "business_name": sess["real"]["name"], "role": "admin"}
+        out["real"] = {"business_id": sess["real"]["business_id"], "business_name": sess["real"]["name"], "role": "admin", "user_id": sess["user"]["id"]}
         with closing(db()) as con:
             users = con.execute("SELECT * FROM users WHERE active=1 ORDER BY role='admin' DESC, id").fetchall()
         out["accounts"] = [{"business_id": x["business_id"], "name": x["business_name"], "role": x["role"], "role_name": ROLE_NAMES[x["role"]],
@@ -2413,12 +2413,8 @@ def _start_page(sess: dict | None) -> str:
     return _entry_page("CIRCULATE", body)
 
 
-@app.get("/login/{role}", response_class=HTMLResponse)
-def login_page(role: str, request: Request):
-    if role not in ROLE_NAMES:
-        raise HTTPException(404, "There is no such login page. Choose seller, buyer or admin on the start page.")
-    if _session(request) is not None:
-        return RedirectResponse("/app", status_code=307)
+def _demo_login_page(role: str) -> str:
+    """AUTH_MODE=demo only: the one-tap business login."""
     e = _html.escape
     accounts = [a for a in _demo_accounts().values() if a["role"] == role]
     first = accounts[0]
@@ -2439,7 +2435,7 @@ def login_page(role: str, request: Request):
         <p class="note">Demo: this signs you in as {e(first["short_name"])}.</p></form></details>
     <p class="err" id="lerr" role="alert" hidden></p>
   </div>
-  <p class="entry-foot">Demo login. No real accounts or passwords.</p>
+  <p class="entry-foot"><b>Demo login mode.</b> One-tap sign-in is switched on (AUTH_MODE=demo).</p>
 </div>
 <script>
 const ROLE = {json.dumps(role)}, FIRST = {json.dumps(first["business_id"])};
@@ -2458,6 +2454,185 @@ document.querySelectorAll(".acct").forEach(b => b.onclick = () => signIn(b.datas
 document.getElementById("pf").onsubmit = ev => {{ ev.preventDefault(); signIn(FIRST); }};
 </script>"""
     return _entry_page(f"{ROLE_NAMES[role]} login · CIRCULATE", body)
+
+
+PROTOTYPE_NOTE = "Prototype server. Accounts created here may be reset when the server restarts. Demo accounts are always available."
+
+
+@app.get("/login/{role}", response_class=HTMLResponse)
+def login_page(role: str, request: Request):
+    if role not in ROLE_NAMES:
+        raise HTTPException(404, "There is no such login page. Choose seller, buyer or admin on the start page.")
+    if _session(request) is not None:
+        return RedirectResponse("/app", status_code=307)
+    if auth_mode() == "demo":
+        return _entry_page(f"{ROLE_NAMES[role]} login · CIRCULATE", _demo_login_page(role))
+    e = _html.escape
+    demo_pw = os.environ.get("DEMO_PASSWORD") or "Circulate@2026"
+    demos = [(email, _demo_accounts()[bid]) for email, bid, r, _ in DEMO_USERS if r == role]
+    panel = ""
+    if demos:
+        panel = (f'<details class="demo-panel" open><summary>Demo accounts <span class="pill p-warn">Demo only</span></summary>'
+                 f'<p class="note">Tap a business to fill in its email and password, then press Sign in.</p><div class="accts">'
+                 + "".join(f'<button class="acct" type="button" data-email="{e(email)}"><span class="av">{e(a["initial"])}</span>'
+                           f'<span class="ac-t"><b>{e(a["short_name"])}</b><span>{e(email)}</span></span><span class="pill">{e(ROLE_NAMES[role])}</span>'
+                           f'{_ic("chevron-right")}</button>' for email, a in demos) + '</div></details>')
+    create = (f'<p class="login-alt">New to CIRCULATE? <a href="/signup/{role}">Create a {role} account</a></p>' if role != "admin" else "")
+    body = f"""<div class="login r-{role}">
+  <a class="entry-back" href="/">{_ic("chevron-right")}Back</a>
+  <div class="login-card">
+    <div class="login-head">{_MARK}<div><span class="lbl">CIRCULATE</span><h1>{e(ROLE_NAMES[role])} sign-in</h1></div></div>
+    <form id="lf" class="form" novalidate>
+      <label class="field">Email<input id="em" type="email" autocomplete="username" inputmode="email" required></label>
+      <label class="field">Password<span class="pw"><input id="pw" type="password" autocomplete="current-password" required>
+        <button class="btn sm ghost" type="button" id="pwt" aria-pressed="false" aria-controls="pw">Show</button></span></label>
+      <p class="err" id="lerr" role="alert" hidden></p>
+      <button class="btn pri lg" type="submit" id="go">Sign in</button>
+      <p class="note">Forgot password? Ask the CIRCULATE admin.</p>
+    </form>
+    {create}
+    {panel}
+  </div>
+  <p class="entry-foot">{e(PROTOTYPE_NOTE)}</p>
+</div>
+<script>
+const ROLE = {json.dumps(role)}, DEMO_PW = {json.dumps(demo_pw if demos else "")};
+const em = document.getElementById("em"), pw = document.getElementById("pw"), er = document.getElementById("lerr"), go = document.getElementById("go");
+document.getElementById("pwt").onclick = ev => {{ const show = pw.type === "password"; pw.type = show ? "text" : "password"; ev.target.textContent = show ? "Hide" : "Show"; ev.target.setAttribute("aria-pressed", String(show)); }};
+document.querySelectorAll("[data-email]").forEach(b => b.onclick = () => {{ em.value = b.dataset.email; pw.value = DEMO_PW; er.hidden = true; go.focus(); }});
+document.getElementById("lf").onsubmit = async ev => {{
+  ev.preventDefault(); er.hidden = true;
+  if (!em.value.trim() || !pw.value) {{ er.hidden = false; er.textContent = "Enter your email and password."; return; }}
+  go.disabled = true;
+  try {{
+    const r = await fetch("/api/auth/login", {{method: "POST", headers: {{"Content-Type": "application/json"}}, body: JSON.stringify({{email: em.value, password: pw.value, role: ROLE}})}});
+    const t = await r.json().catch(() => ({{}}));
+    if (r.ok) {{ location.replace("/app"); return; }}
+    er.hidden = false; er.textContent = typeof t.detail === "string" ? t.detail : "Sign-in did not work. Try again.";
+  }} catch (x) {{ er.hidden = false; er.textContent = "Could not reach the app. Check that it is still running, then try again."; }}
+  go.disabled = false;
+}};
+</script>"""
+    return _entry_page(f"{ROLE_NAMES[role]} sign-in · CIRCULATE", body)
+
+
+@app.get("/signup/{role}", response_class=HTMLResponse)
+def signup_page(role: str, request: Request):
+    if role not in ("seller", "buyer"):
+        raise HTTPException(404, "Accounts can be created for sellers and buyers. The CIRCULATE admin is set up on the server.")
+    if _session(request) is not None:
+        return RedirectResponse("/app", status_code=307)
+    e = _html.escape
+    f = lambda k, label, inp: f'<label class="field mfield" data-f="{k}">{label}{inp}<span class="ferr" id="e-{k}"></span></label>'
+    types = "".join(f'<label><input type="radio" name="seller_type" value="{k}">{e(v)}</label>' for k, v in SELLER_TYPES.items())
+    body = f"""<div class="login signup r-{role}">
+  <a class="entry-back" href="/login/{role}">{_ic("chevron-right")}Back to sign-in</a>
+  <div class="login-card">
+    <div class="login-head">{_MARK}<div><span class="lbl">CIRCULATE</span><h1>Create a {role} account</h1></div></div>
+    <form id="sf" class="form" novalidate><div class="mgrid">
+      {f("business_name", "Business name", '<input name="business_name" autocomplete="organization">')}
+      {'<div class="field mfield wide" role="group" aria-label="Seller type"><span>What kind of seller are you?</span><div class="opts">' + types + '</div><span class="ferr" id="e-seller_type"></span></div>' if role == "seller" else ""}
+      {f("contact_name", "Your name", '<input name="contact_name" autocomplete="name">')}
+      {f("email", "Email", '<input name="email" type="email" autocomplete="email" inputmode="email">')}
+      {f("phone", "Mobile number (10 digits)", '<input name="phone" type="tel" inputmode="numeric" autocomplete="tel" placeholder="98765 43210">')}
+      {f("area", "Area", '<input name="area" placeholder="e.g. Ambattur" autocomplete="address-level2">')}
+      <div class="field mfield wide" role="group" aria-label="Lane"><span>What do you deal in?</span><div class="opts">
+        <label><input type="radio" name="lane" value="durable">Durable: steel, aluminium, plywood, bars</label><label><input type="radio" name="lane" value="fresh">Fresh: food and perishables</label></div><span class="ferr" id="e-lane"></span></div>
+      {f("password", "Password (at least 8 characters)", '<input name="password" type="password" autocomplete="new-password">')}
+      {f("confirm", "Confirm password", '<input name="confirm" type="password" autocomplete="new-password">')}
+    </div>
+    <label class="check"><input type="checkbox" id="show"> Show passwords</label>
+    <p class="err" id="serr" role="alert" hidden></p>
+    <button class="btn pri lg" type="submit" id="go">Create account</button></form>
+    <p class="login-alt">Already have an account? <a href="/login/{role}">Sign in</a></p>
+  </div>
+  <p class="entry-foot">{e(PROTOTYPE_NOTE)}</p>
+</div>
+<script>
+const ROLE = {json.dumps(role)}, form = document.getElementById("sf"), go = document.getElementById("go"), er = document.getElementById("serr");
+document.getElementById("show").onchange = ev => form.querySelectorAll("[name=password],[name=confirm]").forEach(i => i.type = ev.target.checked ? "text" : "password");
+form.querySelectorAll("[name=seller_type]").forEach(r => r.onchange = () => {{ if (r.value === "kitchen" && r.checked) form.querySelector("[name=lane][value=fresh]").checked = true; }});
+form.onsubmit = async ev => {{
+  ev.preventDefault(); er.hidden = true; form.querySelectorAll(".ferr").forEach(x => x.textContent = ""); form.querySelectorAll("[aria-invalid]").forEach(x => x.removeAttribute("aria-invalid"));
+  const fd = new FormData(form), body = {{role: ROLE}};
+  for (const k of ["business_name", "seller_type", "contact_name", "email", "phone", "area", "lane", "password", "confirm"]) body[k] = fd.get(k) || "";
+  go.disabled = true;
+  try {{
+    const r = await fetch("/api/auth/register", {{method: "POST", headers: {{"Content-Type": "application/json"}}, body: JSON.stringify(body)}});
+    const t = await r.json().catch(() => ({{}}));
+    if (r.ok) {{ location.replace("/app"); return; }}
+    const es = (t.detail && t.detail.errors) || {{}};
+    let first = null;
+    for (const k in es) {{ const x = document.getElementById("e-" + k); if (x) x.textContent = es[k]; const i = form.querySelector(`[name=${{k}}]`); if (i) {{ i.setAttribute("aria-invalid", "true"); first = first || i; }} }}
+    if (!Object.keys(es).length) {{ er.hidden = false; er.textContent = typeof t.detail === "string" ? t.detail : "Something went wrong. Try again."; }}
+    if (first) first.focus();
+  }} catch (x) {{ er.hidden = false; er.textContent = "Could not reach the app. Check that it is still running, then try again."; }}
+  go.disabled = false;
+}};
+</script>"""
+    return _entry_page(f"Create a {role} account · CIRCULATE", body)
+
+
+# ---------------- Account page and admin user management ----------------
+def _profile(u) -> dict:
+    return {"id": u["id"], "role": u["role"], "role_name": ROLE_NAMES[u["role"]], "seller_type": u["seller_type"],
+            "seller_type_name": SELLER_TYPES.get(u["seller_type"] or "", ""), "business_id": u["business_id"], "business_name": u["business_name"],
+            "contact_name": u["contact_name"], "email": u["email"], "phone": u["phone"] or "", "area": u["area"] or "", "lane": u["lane"],
+            "active": bool(u["active"]), "created_at": u["created_at"], "last_login_at": u["last_login_at"]}
+
+
+@app.get("/api/account")
+def my_account(request: Request):
+    sess = _session(request)
+    if sess is None:
+        raise HTTPException(401, "Not signed in.")
+    return _profile(sess["user"])
+
+
+def _admin_only(request: Request) -> dict:
+    sess = _session(request)
+    if sess is None:
+        raise HTTPException(401, "Not signed in.")
+    if sess["real"]["role"] != "admin":
+        raise HTTPException(403, "Only the CIRCULATE admin can do this.")
+    return sess
+
+
+@app.get("/api/admin/users")
+def admin_users(request: Request):
+    _admin_only(request)
+    with closing(db()) as con:
+        rows = con.execute("SELECT * FROM users ORDER BY role='admin' DESC, role, id").fetchall()
+    return {"users": [_profile(u) for u in rows], "demo_emails": [d[0] for d in DEMO_USERS]}
+
+
+class ActiveIn(BaseModel):
+    active: bool
+
+
+@app.post("/api/admin/users/{uid}/active")
+def admin_set_active(uid: int, a: ActiveIn, request: Request):
+    sess = _admin_only(request)
+    if uid == sess["user"]["id"] and not a.active:
+        raise HTTPException(422, "You cannot switch off your own admin account.")
+    with closing(db()) as con, con:
+        n = con.execute("UPDATE users SET active=?, token_version=token_version+? WHERE id=?", (int(a.active), 0 if a.active else 1, uid)).rowcount
+    if not n:
+        raise HTTPException(404, "No such account.")
+    return _profile(_user("id=?", uid))
+
+
+@app.post("/api/admin/users/{uid}/temp-password")
+def admin_temp_password(uid: int, request: Request):
+    """A new temporary password, shown once to the admin. Every existing session of that account stops working."""
+    _admin_only(request)
+    if _user("id=?", uid) is None:
+        raise HTTPException(404, "No such account.")
+    temp = secrets.token_urlsafe(9)
+    salt, h = AUTH.hash_password(temp)
+    with closing(db()) as con, con:
+        con.execute("UPDATE users SET password_hash=?, salt=?, token_version=token_version+1 WHERE id=?", (h, salt, uid))
+    return {"temporary_password": temp, "note": "Give this to the account holder and ask them to change it under Account."}
 
 
 # ---------------- Add stock: direct links to the four pages ----------------

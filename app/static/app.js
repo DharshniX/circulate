@@ -155,7 +155,8 @@ const TITLES = {
   prices: ["Price references", "Every price the engine uses, with its source and date."],
   rules: ["Rules", "What the engine checks before it accepts a piece or a lot."],
   sim: ["Simulation lab", "Gap Fill tested on 5,000 simulated sheets. Simulated, sample prices."],
-  users: ["All users", "Every demo business and what it sees. View the app as any of them in one click."],
+  users: ["All users", "Every account on this server. Switch an account off or on, set a temporary password, or view the app as a business."],
+  account: ["Account", "Your profile and password."],
 };
 const st = {lane: "durable", role: "seller", view: "", scen: {durable: "steel", fresh: "food"}, ord: {}, rate: {}, off: {},
   plan: {rejected: [], elapsed: 0, key: null}, deadline: {}, gf: null, gfDeclined: [], gfOpen: false, sellerFilter: "", lastDeal: null,
@@ -171,7 +172,7 @@ function navFor(role, lane) { return NAV[role].flatMap(([, items]) => items).fil
 const home = () => navFor(st.role, st.lane)[0][0];
 // A seller or buyer (including the admin "viewing as" one) always works in their own business's lane; only the admin chooses.
 const laneLocked = () => !!SESSION && SESSION.role !== "admin";
-const allowed = view => view === "ready" || navFor(st.role, st.lane).some(n => n[0] === view);
+const allowed = view => view === "ready" || view === "account" || navFor(st.role, st.lane).some(n => n[0] === view);
 function notYours(view) {
   // another role's screen: a quiet note, then your own home (a screen of your own role that needs the other lane just goes home)
   if (view && VIEWS[view] && SESSION && !SESSION.views.includes(view)) toast(`That page is for ${SESSION.owners[view] ? SESSION.owners[view].for : "another role"}.`);
@@ -200,7 +201,7 @@ function shell() {
   $("#lane").parentElement.hidden = laneLocked();
   $("#lane").className = "seg " + LANES[st.lane].cls;
   $("#lane").innerHTML = Object.entries(LANES).map(([k, v]) => `<button type="button" data-lane="${k}" aria-pressed="${k === st.lane}">${v.name}</button>`).join("");
-  $("#who").innerHTML = `<span class="who-av" aria-hidden="true">${esc(S.initial)}</span><span class="who-t"><b title="${esc(S.business_name)}">${esc(S.short_name)}</b><span class="pill role-${S.role}">${esc(S.role_name)}</span></span>`
+  $("#who").innerHTML = `<button type="button" class="who-btn" data-view="account" title="Account: ${esc(S.business_name)}"><span class="who-av" aria-hidden="true">${esc(S.initial)}</span><span class="who-t"><b>${esc(S.short_name)}</b><span class="pill role-${S.role}">${esc(S.role_name)}</span></span></button>`
     + (S.accounts ? `<label class="viewas-pick"><span class="vh">View as</span><select id="viewAs" aria-label="View the app as a demo business"><option value="">View as…</option>${S.accounts.map(a => `<option value="${esc(a.business_id)}" ${S.viewing_as && a.business_id === S.business_id ? "selected" : ""}>${esc(a.name)} · ${esc(a.role_name)}</option>`).join("")}</select></label>` : "")
     + `<button class="btn sm ghost" type="button" id="logout">Log out</button>`;
   let mode = $("#modeBar");
@@ -220,7 +221,7 @@ async function switchSession(method, path, body) {
 }
 document.addEventListener("change", e => { if (e.target.id === "viewAs" && e.target.value) switchSession("POST", "/api/session/view-as", {business_id: e.target.value}); });
 document.addEventListener("click", e => {
-  if (e.target.closest("#logout")) { fetch("/api/session", {method: "DELETE"}).finally(() => location.replace("/")); return; }
+  if (e.target.closest("#logout,[data-logout]")) { fetch("/api/auth/logout", {method: "POST"}).finally(() => location.replace("/")); return; }
   if (e.target.closest("#exitView")) { fetch("/api/session/view-as", {method: "DELETE"}).finally(() => location.replace("/app")); return; }
   const brand = e.target.closest(".brand");
   if (brand) { e.preventDefault(); go({view: home()}); return; }
@@ -1060,6 +1061,12 @@ async function vStock(el) {
   const k = laneScen(), S = await scen(k), fresh = S.meta.engine === "perishable";
   let r, imp;
   try { [r, imp] = await Promise.all([api(`/api/stock/${k}`), api(`/api/stock/import_${st.lane}`)]); } catch (e) { el.innerHTML = errBox(e); return; }
+  if (SESSION.role === "seller" && !SESSION.seller_id) r = {items: []};  // a new business has no sample stock: only what it adds
+  if (SESSION.role === "seller" && !SESSION.seller_id && !imp.items.length) {
+    el.innerHTML = emptyState("package", "No stock yet. Add stock to begin.", `<button class="btn pri" type="button" id="toAdd">${ic("plus")}Add stock</button>`);
+    $("#toAdd", el).onclick = () => go({view: "add"});
+    return;
+  }
   if (st.sellerFilter && !S.data.sellers.some(s => s.id === st.sellerFilter)) st.sellerFilter = "";  // your business is not in this material
   let items = r.items.filter(x => !st.sellerFilter || x.seller_id === st.sellerFilter);
   if (fresh) items = items.slice().sort((a, b) => a.hours_left - b.hours_left);
@@ -1331,21 +1338,69 @@ async function vWhatsapp(el) {
   });
 }
 
-/* ---------------- Admin: all users (demo accounts) ---------------- */
+/* ---------------- Account: profile, password, log out ---------------- */
+async function vAccount(el) {
+  const A = await api("/api/account"), P = st.pw || (st.pw = {err: {}, msg: ""});
+  const row = (k, v) => v ? `<tr><th scope="row">${k}</th><td>${esc(v)}</td></tr>` : "";
+  const fld = (k, label, ac) => `<label class="field mfield" data-f="${k}">${label}<input name="${k}" type="password" autocomplete="${ac}" ${P.err[k] ? 'aria-invalid="true"' : ""}><span class="ferr">${esc(P.err[k] || "")}</span></label>`;
+  el.innerHTML = `${SESSION.viewing_as ? `<p class="note">You are viewing the app as ${esc(SESSION.business_name)}. This page shows your own admin account.</p>` : ""}
+  <div class="grid2">
+    <div class="card"><h3>Profile</h3><div class="scroll"><table class="kv">
+      ${row("Business", A.business_name)}${row("Role", A.role_name)}${row("Seller type", A.seller_type_name)}${row("Contact", A.contact_name)}
+      ${row("Email", A.email)}${row("Phone", A.phone)}${row("Area", A.area)}${row("Lane", cap1(A.lane || ""))}${row("Member since", (A.created_at || "").slice(0, 10))}</table></div>
+      <p class="note">To change these details, ask the CIRCULATE admin.</p>
+      <div><button class="btn" type="button" data-logout>Log out</button></div></div>
+    <div class="card"><h3>Change password</h3><form id="pwf" class="form" novalidate><div class="mgrid">
+      ${fld("current", "Current password", "current-password")}${fld("new", "New password (at least 8 characters)", "new-password")}${fld("confirm", "Confirm new password", "new-password")}</div>
+      <label class="check"><input type="checkbox" id="pwShow"> Show passwords</label>
+      ${P.msg ? `<p class="ok-msg" role="status">${esc(P.msg)}</p>` : ""}
+      <div><button class="btn pri" type="submit">Change password</button></div>
+      <p class="note">Changing your password signs you out everywhere else.</p></form></div>
+  </div>`;
+  st.pw = {err: {}, msg: ""};
+  const f = el.querySelector("#pwf");
+  el.querySelector("#pwShow").onchange = e => f.querySelectorAll("input[name]").forEach(i => { i.type = e.target.checked ? "text" : "password"; });
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const fd = new FormData(f), body = {current: fd.get("current"), new: fd.get("new"), confirm: fd.get("confirm")};
+    const r = await fetch("/api/auth/change-password", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+    const t = await r.json().catch(() => ({}));
+    if (r.ok) { st.pw = {err: {}, msg: "Password changed."}; toast("Password changed."); }
+    else st.pw = {err: (t.detail && t.detail.errors) || {}, msg: typeof t.detail === "string" ? t.detail : ""};
+    render();
+  };
+}
+
+/* ---------------- Admin: all users ---------------- */
 async function vUsers(el) {
-  const C = await api("/api/whatsapp/contacts"), accs = SESSION.accounts || [];
+  const [U, C] = await Promise.all([api("/api/admin/users"), api("/api/whatsapp/contacts")]);
   const norm = n => String(n || "").split(",")[0].trim().toLowerCase();
-  const nums = a => C.contacts.filter(c => norm(c.business) === norm(a.name)).length;
-  el.innerHTML = `<div class="card"><div class="scroll"><table><tr><th>Business</th><th>Role</th><th>Area</th><th>Lane</th><th class="n">WhatsApp numbers</th><th></th></tr>
-    ${accs.map(a => `<tr><td><span class="who-av sm" aria-hidden="true">${esc(a.name[0])}</span> <b>${esc(a.name.split(", ")[0])}</b></td><td><span class="pill role-${a.role}">${esc(a.role_name)}</span></td>
-      <td>${esc(a.area || "–")}</td><td>${esc(cap1(a.lane || ""))}</td><td class="n">${nums(a)}</td>
-      <td>${a.role === "admin" ? `<span class="note">${SESSION.viewing_as ? "" : "You"}</span>` : `<button class="btn sm" type="button" data-viewas="${esc(a.business_id)}">${ic("eye", "sm")}View as</button>`}</td></tr>`).join("")}</table></div>
-    <p class="note">Demo accounts only: there are no passwords and nothing secret is stored. View as switches the whole app to that business, for a live demo; Exit in the banner brings you back.</p></div>`;
+  const nums = u => C.contacts.filter(c => norm(c.business) === norm(u.business_name)).length;
+  const demo = new Set(U.demo_emails), myId = (SESSION.real || {}).user_id;
+  el.innerHTML = `<div class="card"><div class="scroll"><table><tr><th>Business and email</th><th>Role</th><th>Area and lane</th><th>Status</th><th>Actions</th></tr>
+    ${U.users.map(u => `<tr${u.active ? "" : ' class="off"'}><td><span class="who-av sm" aria-hidden="true">${esc((u.business_name || "?")[0])}</span> <b>${esc(u.business_name.split(", ")[0])}</b>${demo.has(u.email) ? ' <span class="pill p-warn">Demo</span>' : ""}<div class="note">${esc(u.email)} · ${nums(u)} WhatsApp ${nums(u) === 1 ? "number" : "numbers"}</div></td>
+      <td><span class="pill role-${u.role}">${esc(u.role_name)}</span>${u.seller_type_name ? `<div class="note">${esc(u.seller_type_name)}</div>` : ""}</td>
+      <td>${esc(u.area || "–")}<div class="note">${esc(cap1(u.lane || ""))}</div></td>
+      <td>${u.active ? '<span class="pill p-ok">Active</span>' : '<span class="pill p-mut">Switched off</span>'}</td>
+      <td class="acts">${u.id === myId ? '<span class="note">You</span>' : `<span class="acts-in">
+        ${u.role !== "admin" && u.active ? `<button class="btn sm" type="button" data-viewas="${esc(u.business_id)}">${ic("eye", "sm")}View as</button>` : ""}
+        <button class="btn sm ghost" type="button" data-active="${u.id}" data-to="${u.active ? 0 : 1}">${u.active ? "Switch off" : "Switch on"}</button>
+        <button class="btn sm ghost" type="button" data-temp="${u.id}" data-name="${esc(u.email)}" title="Set a temporary password">Reset password</button></span>`}</td></tr>`).join("")}</table></div>
+    <p class="note">Switching an account off signs it out at once. A temporary password is shown here once; give it to the account holder and ask them to change it under Account. No emails are sent.</p></div>`;
   el.querySelectorAll("[data-viewas]").forEach(b => b.onclick = () => switchSession("POST", "/api/session/view-as", {business_id: b.dataset.viewas}));
+  el.querySelectorAll("[data-active]").forEach(b => b.onclick = async () => {
+    try { await api(`/api/admin/users/${b.dataset.active}/active`, {active: b.dataset.to === "1"}); toast(b.dataset.to === "1" ? "Account switched on." : "Account switched off."); render(); }
+    catch (e) { toast(esc(e.message), "bad"); }
+  });
+  el.querySelectorAll("[data-temp]").forEach(b => b.onclick = async () => {
+    if (!confirm(`Set a new temporary password for ${b.dataset.name}? Their current password stops working.`)) return;
+    try { const r = await api(`/api/admin/users/${b.dataset.temp}/temp-password`, {}); prompt(`Temporary password for ${b.dataset.name}. Copy it now; it is not shown again.`, r.temporary_password); }
+    catch (e) { toast(esc(e.message), "bad"); }
+  });
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {users: vUsers, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, add: vAdd, "add-csv": vAddCsv, "add-sync": vAddSync, "add-manual": vAddManual, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {users: vUsers, account: vAccount, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, add: vAdd, "add-csv": vAddCsv, "add-sync": vAddSync, "add-manual": vAddManual, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();

@@ -479,6 +479,13 @@ input[type=date]{font-family:var(--mono)}
 /* ---------- demo logins: start page, login pages, who is signed in ---------- */
 .role-seller{background:var(--np-soft);color:var(--np)}.role-buyer{background:var(--pe-soft);color:var(--pe)}.role-admin{background:var(--panel-2);color:var(--fg);box-shadow:inset 0 0 0 1px var(--line-2)}
 .who{display:flex;align-items:center;gap:10px;min-width:0}
+.who-btn{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;gap:10px;min-width:0;padding:4px 8px 4px 4px;border-radius:999px}
+.who-btn:hover{background:var(--panel-2)}.who-btn:focus-visible{outline:2px solid var(--ring);outline-offset:2px}
+table.kv th{text-align:left;color:var(--mut);font-weight:500;width:40%}
+tr.off td{color:var(--mut)}.acts-in{display:flex;gap:4px}
+.ok-msg{color:var(--ok)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr));gap:var(--s3);align-items:start}
+.grid2 .card{display:flex;flex-direction:column;gap:var(--s2)}
 .who-av{width:32px;height:32px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;flex:none;background:var(--fg);color:var(--panel);font:600 14px var(--disp)}
 .who-av.sm{width:24px;height:24px;font-size:12px;vertical-align:middle}
 .who-t{display:flex;align-items:center;gap:8px;min-width:0}.who-t b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
@@ -524,6 +531,16 @@ body.entry{min-height:100vh;display:flex;background:var(--bg)}
   .who-t b{max-width:120px}.viewas-pick select{max-width:150px}.who{flex-wrap:wrap}
   .login-card{padding:var(--s3) var(--s2)}
 }
+/* real sign-in and sign-up */
+.login .form{gap:var(--s2)}.login .field input{width:100%;height:44px;font-size:15px}
+.pw{display:flex;gap:var(--s1);align-items:center}.pw input{flex:1;min-width:0}.pw .btn{flex:none;min-width:64px}
+.login .err[hidden]{display:none}
+.login-alt{color:var(--mut);text-align:center}.login-alt a{font-weight:600}
+.demo-panel{border-top:1px solid var(--line);padding-top:var(--s2);display:flex;flex-direction:column;gap:var(--s1)}
+.demo-panel>summary{font-weight:600;cursor:pointer;display:flex;align-items:center;gap:var(--s1)}
+.demo-panel .accts{margin-top:var(--s1)}
+.login.signup{max-width:720px}
+.signup .opts label{white-space:normal;text-align:center;padding:8px 12px}
 main.entry-main>.entry-head{flex-direction:row;max-width:none;justify-content:center;gap:var(--s2)}
 .entry-cont{text-align:center}
 

@@ -61,15 +61,23 @@ def test_app_without_session_goes_to_the_start_page():
     assert "app.js" in client("buyer", "steel:W").get("/app").text
 
 
-def test_login_pages():
+def test_login_pages(monkeypatch):
     c = client()
-    seller = c.get("/login/seller").text
-    assert "Sri Ram Fabricators" in seller and "Thamarai Hotel Kitchen" in seller and "Demo login. No real accounts or passwords." in seller
-    assert "Sign in with phone" in seller and 'value="1234"' in seller and 'href="/"' in seller
+    seller = c.get("/login/seller").text  # real mode: email and password, demo businesses only prefill
+    assert 'type="password"' in seller and "Sign in" in seller and "Create a seller account" in seller
+    assert "sriram@demo.circulate" in seller and "thamarai@demo.circulate" in seller and "Demo accounts" in seller
+    assert "Accounts created here may be reset" in seller and "/api/session" not in seller and 'href="/"' in seller
     buyer = c.get("/login/buyer").text
-    assert all(n in buyer for n in ("Ezhil Engineering Works", "Anna Nagar Boys", "Thozhan Food Bank"))
-    assert "CIRCULATE Admin" in c.get("/login/admin").text
+    assert all(n in buyer for n in ("ezhil@demo.circulate", "anna@demo.circulate", "thozhan@demo.circulate"))
+    admin = c.get("/login/admin").text
+    assert "Admin sign-in" in admin and "Create a" not in admin and 'data-email="' not in admin
     assert c.get("/login/owner").status_code == 404
+    assert "Seller type" in c.get("/signup/seller").text and "Seller type" not in c.get("/signup/buyer").text
+    assert c.get("/signup/admin").status_code == 404
+    monkeypatch.setenv("AUTH_MODE", "demo")  # the emergency switch brings back the one-tap page
+    seller = c.get("/login/seller").text
+    assert "Sri Ram Fabricators" in seller and "Demo login mode" in seller and "Sign in with phone" in seller
+    monkeypatch.delenv("AUTH_MODE")
     signed = client("seller", "steel:A")
     r = signed.get("/login/seller", follow_redirects=False)
     assert r.status_code == 307 and r.headers["location"] == "/app"  # already signed in: straight to your home
