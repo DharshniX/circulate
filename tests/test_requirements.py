@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 from engine import scenarios as SC
 
 c = TestClient(main.app)
@@ -22,6 +23,7 @@ FOOD = {"categories": ["vegetables"], "quantity": 10, "storage_available": ["amb
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB", tmp_path / "test.db")
+    sign_in(c, "admin")  # a fresh database each test: sign in again
 
 
 def post(lane, kind, fields, **kw):

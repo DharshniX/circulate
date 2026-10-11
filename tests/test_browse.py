@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 from engine import scenarios as SC
 
 c = TestClient(main.app)
@@ -17,6 +18,7 @@ JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
 def temp_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB", tmp_path / "test.db")
     monkeypatch.setattr(main, "PHOTOS", tmp_path / "photos")
+    sign_in(c, "admin")  # a fresh database each test: sign in again
 
 
 def items(lane):
@@ -61,10 +63,10 @@ def test_fresh_cards_have_hours_and_disposal_cost():
 def test_imported_stock_appears_without_invented_prices():
     text = (main.EXAMPLES / "durable_stock_example.csv").read_text()
     c.post("/api/import/list", json={"lane": "durable", "csv_text": text, "measured": True})
-    imp = [i for i in items("durable").values() if i["key"] == "import_durable"]
+    imp = [i for i in items("durable").values() if i["key"] == "import_durable@admin"]  # the admin's own test items
     assert len(imp) == 5 and all(i["label"] == "measured" for i in imp)
     assert all(i["floor"] is None and i["ceiling"] is None for i in imp)  # still no invented prices on the card
-    # own items are now matched as "Your workshop": an order to open, or the engine's reason why none fits
+    # the admin's own items are matched as "Your workshop": an order to open, or the engine's reason why none fits
     assert all(i["match_seller"] == "YOU" and (i["order"] or i["order_reason"]) for i in imp)
     ms103 = next(i for i in imp if i["id"] == "MS-103")  # 6 mm offcut: the sample orders are all 2 mm
     assert ms103["order"] is None and "thickness" in ms103["order_reason"]

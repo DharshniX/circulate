@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 from engine import connectors as CN
 
 c = TestClient(main.app)
@@ -19,6 +20,7 @@ def temp_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB", tmp_path / "test.db")
     monkeypatch.setattr(main, "ERP_DROP", tmp_path / "erp_drop")
     monkeypatch.setattr(main, "SYNC_MIN_AGE_SECONDS", 0)
+    sign_in(c, "admin")  # a fresh database each test: sign in again
 
 
 @pytest.fixture

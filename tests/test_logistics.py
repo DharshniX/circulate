@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 
 c = TestClient(main.app)
 TOMORROW = (date.today() + timedelta(days=1)).isoformat()
@@ -16,6 +17,7 @@ TOMORROW = (date.today() + timedelta(days=1)).isoformat()
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB", tmp_path / "test.db")
+    sign_in(c, "admin")  # a fresh database each test: sign in again
 
 
 def accept(key, n=0, rate=1.0, with_scenario=True):

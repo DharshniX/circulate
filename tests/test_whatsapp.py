@@ -7,6 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 from engine import messages as M
 
 c = TestClient(main.app)
@@ -18,6 +19,7 @@ ALL = ["new_match", "order_accepted", "pickup_booked", "delivered"]  # fresh-foo
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB", tmp_path / "test.db")
+    sign_in(c, "admin")  # a fresh database each test: sign in again
 
 
 def ok_message(text, *must):

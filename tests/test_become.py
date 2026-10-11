@@ -3,6 +3,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 from engine import become as BEC
 from engine import scenarios as SC
 from engine.models import Defect, FlatPiece
@@ -17,6 +18,7 @@ OFFCUT_2MM = {"material": "mild_steel", "length_mm": "1250", "width_mm": "600", 
 def temp_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB", tmp_path / "test.db")
     monkeypatch.setattr(main, "PHOTOS", tmp_path / "photos")
+    sign_in(c, "admin")  # a fresh database each test: sign in again
 
 
 def scenario_data(key):
@@ -31,12 +33,13 @@ def test_an_order_is_filled_from_a_manually_entered_item():
     item = c.post("/api/manual/durable", json={"fields": OFFCUT_2MM}).json()
     assert item["listed"]
     own = c.get("/api/own-stock/steel").json()
-    assert own["seller"]["name"] == "Your workshop" and own["seller"]["id"] == "YOU"
+    [seller] = own["sellers"]  # the admin's own test items are "Your workshop"
+    assert seller["name"] == "Your workshop" and seller["id"] == "YOU" and own["approximate"] == []
     assert [r["id"] for r in own["resources"]] == [f"YOU-{item['item_id']}"]
     data = scenario_data("steel")
     xs = [s["x_km"] for s in data["sellers"]]
-    assert own["seller"]["x_km"] == pytest.approx(sum(xs) / len(xs), abs=0.01)  # placed at the cluster centre
-    data["sellers"].append(own["seller"])
+    assert seller["x_km"] == pytest.approx(sum(xs) / len(xs), abs=0.01)  # placed at the cluster centre
+    data["sellers"].append(seller)
     data["resources"] += own["resources"]
     r = c.post("/api/fulfil", json={"demand_id": "S1", "data": data, "seller_ids": ["YOU"], "allow_partial": True}).json()
     b = r["best"]
@@ -52,7 +55,8 @@ def test_an_order_is_filled_from_a_manually_entered_item():
 
 
 def test_no_own_items_leaves_the_sample_data_unchanged():
-    assert c.get("/api/own-stock/steel").json() == {"seller": None, "resources": [], "note": c.get("/api/own-stock/steel").json()["note"]}
+    own = c.get("/api/own-stock/steel").json()
+    assert own["sellers"] == [] and own["resources"] == [] and own["approximate"] == []
     assert main._dataset_with_own("steel")["resources"] == SC.dataset("steel")["resources"]
     assert c.get("/api/own-stock/bars").json()["resources"] == []  # own items are sheets, not bars
     assert c.get("/api/own-stock/nope").status_code == 404
@@ -137,10 +141,10 @@ def test_a_donation():
 
 def test_own_item_becomes_with_the_cluster_scrap_price():
     item = c.post("/api/manual/durable", json={"fields": OFFCUT_2MM}).json()
-    b = options("import_durable", item["item_id"])
+    b = options(item["stock_key"], item["item_id"])
     assert b["own"] and b["seller_name"] == "Your workshop" and b["scrap"]["price_per_kg"] == 30.0 and b["scrap"]["label"] == "sample"
     assert any(o["id"] == "S1" for o in b["options"])
-    assert c.get("/api/become/import_durable/NOPE").status_code == 404
+    assert c.get(f"/api/become/{item['stock_key']}/NOPE").status_code == 404
     assert c.get("/api/become/nowhere/A1").status_code == 404
 
 

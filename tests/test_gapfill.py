@@ -4,10 +4,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from conftest import sign_in
 from engine.gapfill import GapFillRequest, plan_gap_fill
 from engine.scenarios import gapfill_demo
 
 c = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _signed_in():
+    sign_in(c, "admin")
 
 
 def demo(**kw):

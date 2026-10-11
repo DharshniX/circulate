@@ -99,7 +99,7 @@ def test_view_as_works_only_for_admin():
     seller = client("seller", "steel:A")
     assert seller.post("/api/session/view-as", json={"business_id": "steel:W"}).status_code == 403
     assert seller.delete("/api/session/view-as").status_code == 403
-    assert client().post("/api/session/view-as", json={"business_id": "steel:W"}).status_code == 403
+    assert client().post("/api/session/view-as", json={"business_id": "steel:W"}).status_code == 401  # signed out
     admin = client("admin", "admin")
     v = admin.post("/api/session/view-as", json={"business_id": "steel:A"}).json()
     assert v["viewing_as"] and v["role"] == "seller" and v["business_name"].startswith("Sri Ram") and menu_views(v) == SELLER
@@ -114,7 +114,7 @@ def test_public_pages_still_work_without_a_session():
     c = client()
     assert c.get("/passport/steel/A1").status_code == 200  # QR codes on labels open without a login
     assert c.get("/register").status_code == 200
-    assert c.get("/api/browse/durable").status_code == 200  # no API authentication in this prototype
+    assert c.get("/api/browse/durable").status_code == 401  # the API itself needs a session
 
 
 def test_each_business_works_in_its_own_lane_only():

@@ -23,7 +23,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
@@ -60,6 +60,43 @@ app = FastAPI(title="CIRCULATE", version="0.2", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=ROOT / "static"), name="static")
 
 
+# ---------------- Who may call what: one check for "signed in", one for "role in (...)" ----------------
+# Every /api route uses one of these, except the sign-in endpoints, /api/qr.svg and GET /api/photo (public passports).
+# The checks use the business acting in the request: the signed-in account, or the business the admin is viewing as,
+# so "View as" shows exactly what that business would see.
+def signed_in(request: Request) -> dict:
+    sess = _session(request)
+    if sess is None:
+        raise HTTPException(401, "Not signed in. Sign in on the start page.")
+    return _me(sess)
+
+
+def role_in(*roles: str):
+    """Only these roles. The admin passes every check, except while viewing the app as a business."""
+    def check(request: Request) -> dict:
+        me = signed_in(request)
+        if me["role"] != "admin" and me["role"] not in roles:
+            raise HTTPException(403, "Only the CIRCULATE admin can do this." if roles == ("admin",) else
+                                f"This is for {ROLE_FOR[roles[0]]}. Sign in with a {roles[0]} account to use it.")
+        return me
+    check.guard = roles
+    return check
+
+
+def real_admin(request: Request) -> dict:
+    """The admin's own account management (users, View as): checks the real account, not the business being viewed."""
+    me = signed_in(request)
+    if not me["real_admin"]:
+        raise HTTPException(403, "Only the CIRCULATE admin can do this.")
+    return me
+
+
+signed_in.guard = ("any",)
+real_admin.guard = ("admin",)
+ANY, SELLER, BUYER, ADMIN = Depends(signed_in), Depends(role_in("seller")), Depends(role_in("buyer")), Depends(role_in("admin"))
+REAL_ADMIN = Depends(real_admin)
+
+
 _SEEDED: set[str] = set()
 
 
@@ -72,7 +109,9 @@ def db():
         kg_shipped REAL, route_km REAL, value_above_salvage REAL, buyer_utilisation REAL,
         status TEXT, is_simulated INTEGER, evidence TEXT, buyer_confirmed INTEGER, history TEXT)""")
     have = {r[1] for r in con.execute("PRAGMA table_info(deals)")}
-    for col, typ in (("scenario", "TEXT"), ("rate_multiplier", "REAL"), ("booking", "TEXT")):
+    # seller_business: JSON list of the selling businesses (one deal can pool several); buyer_business: the buying business
+    for col, typ in (("scenario", "TEXT"), ("rate_multiplier", "REAL"), ("booking", "TEXT"), ("seller_business", "TEXT"),
+                     ("buyer_business", "TEXT")):
         if col not in have:  # older databases: add the column, keep every row
             con.execute(f"ALTER TABLE deals ADD COLUMN {col} {typ}")
     con.execute("""CREATE TABLE IF NOT EXISTS users (
@@ -85,6 +124,8 @@ def db():
     con.execute("""CREATE TABLE IF NOT EXISTS requirements (
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, lane TEXT, kind TEXT, scenario TEXT, demand TEXT,
         needed_by TEXT, standing INTEGER, status TEXT, deal_id INTEGER, history TEXT)""")
+    if "owner" not in {r[1] for r in con.execute("PRAGMA table_info(requirements)")}:
+        con.execute("ALTER TABLE requirements ADD COLUMN owner TEXT")  # older rows have no owner: admin only
     con.execute("""CREATE TABLE IF NOT EXISTS reservations (
         req_id INTEGER PRIMARY KEY, seller TEXT, parts INTEGER, at TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS whatsapp_contacts (
@@ -94,18 +135,33 @@ def db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, event TEXT, deal_id INTEGER, item_id TEXT, contact_id INTEGER,
         text TEXT, link TEXT, status TEXT, opened_at TEXT, sent_at TEXT)""")
     con.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_notifications ON notifications(event, IFNULL(deal_id, 0), IFNULL(item_id, ''), contact_id)")
-    con.execute("""CREATE TABLE IF NOT EXISTS sync_folders (
-        lane TEXT PRIMARY KEY, path TEXT, enabled INTEGER, measured INTEGER, days_unused_limit INTEGER, hours_left_limit REAL)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS sync_seen (
-        lane TEXT, file TEXT, fingerprint TEXT, imported_at TEXT, PRIMARY KEY (lane, file))""")
+    # owner = the business_id of the seller who added it; "" for rows saved before accounts existed (admin only)
+    _with_owner(con, "sync_folders", """CREATE TABLE IF NOT EXISTS sync_folders (owner TEXT, lane TEXT, path TEXT, enabled INTEGER,
+        measured INTEGER, days_unused_limit INTEGER, hours_left_limit REAL, PRIMARY KEY (owner, lane))""")
+    _with_owner(con, "sync_seen", """CREATE TABLE IF NOT EXISTS sync_seen (owner TEXT, lane TEXT, file TEXT, fingerprint TEXT,
+        imported_at TEXT, PRIMARY KEY (owner, lane, file))""")
     con.execute("""CREATE TABLE IF NOT EXISTS sync_log (
         id INTEGER PRIMARY KEY AUTOINCREMENT, at TEXT, lane TEXT, folder TEXT, file TEXT, status TEXT, rows_read INTEGER,
         surplus INTEGER, rejected INTEGER, listed INTEGER, label TEXT, message TEXT, details TEXT)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS imported_stock (
-        lane TEXT, item_id TEXT, item TEXT, rules TEXT, label TEXT, listed_at TEXT, PRIMARY KEY (lane, item_id))""")
-    if "source" not in {r[1] for r in con.execute("PRAGMA table_info(imported_stock)")}:
-        con.execute("ALTER TABLE imported_stock ADD COLUMN source TEXT")  # older rows read as CSV imports
+    if "owner" not in {r[1] for r in con.execute("PRAGMA table_info(sync_log)")}:
+        con.execute("ALTER TABLE sync_log ADD COLUMN owner TEXT")
+    _with_owner(con, "imported_stock", """CREATE TABLE IF NOT EXISTS imported_stock (owner TEXT, lane TEXT, item_id TEXT, item TEXT,
+        rules TEXT, label TEXT, listed_at TEXT, source TEXT, PRIMARY KEY (owner, lane, item_id))""")
     return con
+
+
+def _with_owner(con, table: str, create: str) -> None:
+    """Create a table keyed by owner. An older copy without the column is rebuilt once; its rows keep owner '' (admin only)."""
+    old = [r[1] for r in con.execute(f"PRAGMA table_info({table})")]
+    if old and "owner" not in old:
+        con.execute(f"ALTER TABLE {table} RENAME TO {table}_before_owners")
+        con.execute(create)
+        cols = ", ".join(old)
+        con.execute(f"INSERT INTO {table} ({cols}, owner) SELECT {cols}, '' FROM {table}_before_owners")
+        con.execute(f"DROP TABLE {table}_before_owners")
+        con.commit()
+    else:
+        con.execute(create)
 
 
 class Dataset(BaseModel):
@@ -192,35 +248,47 @@ def legacy():
 
 
 @app.get("/api/engines")
-def engines():
+def engines(me=ANY):
     return [{"kind": e.kind, "unit_name": e.unit_name, "time_unit": e.time_unit} for e in REGISTRY.values()]
 
 
 @app.get("/api/scenarios")
-def scenarios():
+def scenarios(me=ANY):
     return [{"key": k, "title": v["title"], "engine": v["engine"]} for k, v in SC.SCENARIOS.items()]
 
 
 @app.get("/api/scenario/{key}")
-def scenario(key: str):
+def scenario(key: str, me=ANY):
+    """A sample cluster. A seller gets only its own sellers and stock (every open order stays, so it sees what fits);
+    a buyer gets every seller's stock and only its own orders; the admin gets everything."""
     if key not in SC.SCENARIOS:
         raise HTTPException(404, f"unknown scenario {key}")
     d = SC.dataset(key)
     body = Dataset(sellers=d["sellers"], resources=d["resources"], demands=d["demands"],
                    transport=d["transport"], settings=d["settings"]).model_dump(mode="json")
+    if me["role"] == "seller":
+        mine = _my_sample_sellers(me, key)
+        body["sellers"] = [s for s in body["sellers"] if s["id"] in mine]
+        body["resources"] = [r for r in body["resources"] if r["seller_id"] in mine]
+    elif me["role"] == "buyer":
+        body["demands"] = [x for x in body["demands"] if f"{key}:{x['buyer_id']}" == me["business_id"]]
     return {**body, **{k: d[k] for k in ("scenario", "title", "engine", "plan_seller", "metric_word")}}
 
 
-@app.get("/api/gapfill/demo")
-def gapfill_demo():
-    """The sample job and standing orders, plus standing orders posted by buyers in this demo."""
+def _gapfill_data() -> dict:
+    """The sample job and standing orders, plus every buyer's open standing orders (a seller sees the ones that fit its sheet)."""
     g = SC.gapfill_demo()
     g["orders"] += _posted_standing()
     return g
 
 
+@app.get("/api/gapfill/demo")
+def gapfill_demo(me=SELLER):
+    return _gapfill_data()
+
+
 @app.post("/api/gapfill")
-def api_gapfill(req: GapFillRequest, request: Request, record: bool = False, seller: str = "Your workshop"):
+def api_gapfill(req: GapFillRequest, request: Request, record: bool = False, me=SELLER):
     """record=true (the Sold before it's cut screen): posted requirements in the plan are marked reserved
     by this seller; posted ones declined or left out go back to open."""
     try:
@@ -228,13 +296,14 @@ def api_gapfill(req: GapFillRequest, request: Request, record: bool = False, sel
     except ValueError as e:
         _bad(e)
     if record:
+        seller = OWN_NAME if me["admin"] else me["name"]
         _record_reservations(req, plan, seller)
         _safely(_notify_gapfill, plan, {o.id: o for o in req.orders}, _origin(request), seller)
     return plan
 
 
 @app.post("/api/fulfil")
-def api_fulfil(req: FulfilRequest):
+def api_fulfil(req: FulfilRequest, me=BUYER):
     d = next((x for x in req.data.demands if x.id == req.demand_id), None)
     if d is None:
         _bad(ValueError(f"unknown demand {req.demand_id}"))
@@ -248,7 +317,7 @@ def api_fulfil(req: FulfilRequest):
 
 
 @app.post("/api/seller-plan")
-def api_seller_plan(req: SellerPlanRequest):
+def api_seller_plan(req: SellerPlanRequest, me=ADMIN):
     seller = next((s for s in req.data.sellers if s.id == req.seller_id), None)
     if seller is None:
         _bad(ValueError(f"unknown seller {req.seller_id}"))
@@ -263,7 +332,7 @@ def api_seller_plan(req: SellerPlanRequest):
 
 
 @app.post("/api/plan")
-def api_plan(req: PlanRequest):
+def api_plan(req: PlanRequest, me=ANY):
     try:
         return plan(req)
     except ValueError as e:
@@ -271,16 +340,30 @@ def api_plan(req: PlanRequest):
 
 
 @app.post("/api/deals")
-def create_deal(d: NewDeal, request: Request):
+def create_deal(d: NewDeal, request: Request, me=BUYER):
+    """A buyer accepts one of its own orders. The deal records both sides, so the buyer and every seller in it can see it."""
+    key = d.scenario if d.scenario in SC.SCENARIOS else _scenario_of(d.demand_id)
+    buyer_business = _demand_owner(key, d.demand_id)
+    if d.requirement_id:
+        req_owner = _requirement_owner(d.requirement_id)
+        buyer_business = buyer_business or req_owner
+        if not me["admin"] and req_owner != me["business_id"]:
+            raise HTTPException(403, "You can accept only your own orders. Post a requirement to get your own.")
+    if not me["admin"]:
+        if buyer_business != me["business_id"]:
+            raise HTTPException(403, "You can accept only your own orders. Post a requirement to get your own.")
+    sellers_business = _seller_owners(key, d.sellers) if key else []
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(db()) as con, con:
         cur = con.execute(
             "INSERT INTO deals (created_at, kind, counterfactual, demand_id, buyer_name, sellers, units, unit_name,"
             " kg_in_units, kg_shipped, route_km, value_above_salvage, buyer_utilisation, status, is_simulated,"
-            " evidence, buyer_confirmed, history, scenario, rate_multiplier) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " evidence, buyer_confirmed, history, scenario, rate_multiplier, seller_business, buyer_business)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (now, d.kind, d.counterfactual, d.demand_id, d.buyer_name, json.dumps(d.sellers), d.units, d.unit_name,
              d.kg_in_units, d.kg_shipped, d.route_km, d.value_above_salvage, d.buyer_utilisation, "agreed",
-             int(d.is_simulated), "[]", 0, json.dumps([{"at": now, "status": "agreed"}]), d.scenario, d.rate_multiplier))
+             int(d.is_simulated), "[]", 0, json.dumps([{"at": now, "status": "agreed"}]), d.scenario, d.rate_multiplier,
+             json.dumps(sellers_business), buyer_business))
         if d.requirement_id:
             row = con.execute("SELECT history FROM requirements WHERE id=?", (d.requirement_id,)).fetchone()
             if row:
@@ -294,11 +377,11 @@ def create_deal(d: NewDeal, request: Request):
 
 
 @app.post("/api/deals/{deal_id}/advance")
-def advance(deal_id: int, a: Advance, request: Request):
+def advance(deal_id: int, a: Advance, request: Request, me=ANY):
     order = {"agreed": 0, "dispatched": 1, "delivered": 2}
     with closing(db()) as con, con:
         row = con.execute("SELECT * FROM deals WHERE id=?", (deal_id,)).fetchone()
-        if row is None:
+        if row is None or not _is_party(me, row):
             raise HTTPException(404, "deal not found")
         if order[a.status] != order[row["status"]] + 1:
             raise HTTPException(409, f"cannot go from {row['status']} to {a.status}")
@@ -315,9 +398,10 @@ def advance(deal_id: int, a: Advance, request: Request):
 
 
 @app.post("/api/ledger")
-def ledger(f: ImpactFactors):
+def ledger(f: ImpactFactors, me=ANY):
+    """Deals this business is part of, as the buyer or one of the sellers. The admin sees every deal."""
     with closing(db()) as con:
-        rows = con.execute("SELECT * FROM deals ORDER BY id DESC").fetchall()
+        rows = [r for r in con.execute("SELECT * FROM deals ORDER BY id DESC").fetchall() if _is_party(me, r)]
     out = []
     for r in rows:
         imp = compute(DealImpactInput(
@@ -326,14 +410,19 @@ def ledger(f: ImpactFactors):
             value_above_salvage=r["value_above_salvage"], buyer_utilisation=r["buyer_utilisation"],
             is_simulated=bool(r["is_simulated"]), status=r["status"], evidence=json.loads(r["evidence"]),
             buyer_confirmed=bool(r["buyer_confirmed"]), ef_avoided=f.ef_avoided, ef_truck=f.ef_truck))
-        out.append({"id": r["id"], "kind": r["kind"], "buyer_name": r["buyer_name"], "sellers": json.loads(r["sellers"]),
-                    "status": r["status"], "is_simulated": bool(r["is_simulated"]),
+        sellers = json.loads(r["sellers"])
+        try:
+            names = _deal_context(r)[1]
+        except Exception:  # noqa: BLE001  an old deal the engine cannot place still lists its seller ids
+            names = {}
+        out.append({"id": r["id"], "kind": r["kind"], "buyer_name": r["buyer_name"], "sellers": sellers,
+                    "seller_names": [names.get(x, x) for x in sellers], "status": r["status"], "is_simulated": bool(r["is_simulated"]),
                     "history": json.loads(r["history"]), "impact": imp})
     return {"deals": out}
 
 
 @app.post("/api/reset")
-def reset():
+def reset(me=ADMIN):
     with closing(db()) as con, con:
         con.execute("DELETE FROM deals")
     return {"ok": True}
@@ -362,22 +451,38 @@ def M_name(key: str) -> str:
     return M.get(key).name
 
 
-IMPORT_KEYS = {"import_durable": "durable", "import_fresh": "fresh"}
+def _import_key(lane: str, owner: str = "") -> str:
+    """Stock key for a seller's listed items: import_durable@<business id>. Plain import_durable holds rows saved before accounts."""
+    return f"import_{lane}" + (f"@{owner}" if owner else "")
 
 
-def _imported_stock(key: str) -> list[dict]:
-    from engine.models import PerishableLot
-    lane = IMPORT_KEYS[key]
+def _parse_import(key: str) -> tuple[str, str] | None:
+    """(lane, owner) for an import key, else None."""
+    m = re.fullmatch(r"import_(durable|fresh)(?:@(.+))?", key)
+    return (m.group(1), m.group(2) or "") if m else None
+
+
+def _import_rows(lane: str, owner: str | None = None) -> list:
+    """Listed rows for one owner, or for every owner (None)."""
+    q, args = "SELECT * FROM imported_stock WHERE lane=?", [lane]
+    if owner is not None:
+        q, args = q + " AND owner=?", args + [owner]
     with closing(db()) as con:
-        rows = con.execute("SELECT * FROM imported_stock WHERE lane=? ORDER BY listed_at, item_id", (lane,)).fetchall()
+        return con.execute(q + " ORDER BY listed_at, item_id", args).fetchall()
+
+
+def _imported_stock(lane: str, owner: str | None = None) -> list[dict]:
+    from engine.models import PerishableLot
+    names = _owner_names()
     out = []
-    for r in rows:
+    for r in _import_rows(lane, owner):
         p = (IMP.ImportedSheet if lane == "durable" else PerishableLot).model_validate_json(r["item"])
-        item = {"id": p.id, "seller_id": p.seller_id, "seller_name": p.seller_id, "kind": p.kind,
+        key = _import_key(lane, r["owner"])
+        item = {"id": p.id, "seller_id": p.seller_id, "seller_name": names.get(r["owner"]) or p.seller_id, "kind": p.kind,
                 "description": _describe(p), "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2),
                 "scrap_value": None, "scrap_price_per_kg": None, "label": r["label"], "status": "available",
                 "passport": f"/passport/{key}/{p.id}", "rules": json.loads(r["rules"]), "source": r["source"] or IMP.SOURCE,
-                "listed_at": r["listed_at"]}
+                "listed_at": r["listed_at"], "key": key, "owner": r["owner"]}
         if p.kind == "perishable":
             item["hours_left"] = p.hours_left
             item["urgent"] = True
@@ -388,8 +493,10 @@ def _imported_stock(key: str) -> list[dict]:
 
 
 def _stock(key: str) -> list[dict]:
-    if key in IMPORT_KEYS:
-        return _imported_stock(key)
+    """Every item under one stock key (passports and labels are public, for QR codes)."""
+    imp = _parse_import(key)
+    if imp:
+        return _imported_stock(*imp)
     if key not in SC.SCENARIOS:
         raise HTTPException(404, f"unknown scenario {key}")
     d = SC.dataset(key)
@@ -411,10 +518,25 @@ def _stock(key: str) -> list[dict]:
 
 
 @app.get("/api/stock/{key}")
-def stock(key: str, request: Request):
-    if key in ("food", "import_fresh"):
+def stock(key: str, request: Request, me=SELLER):
+    """A seller's own stock: its sample pieces in a cluster, or the items it listed (import_durable or import_fresh).
+    The admin gets every seller's, including rows saved before accounts existed."""
+    if key == "food" or key.startswith("import_fresh"):
         _safely(_sweep_fresh, _origin(request))
-    return {"scenario": key, "items": _stock(key)}
+    imp = _parse_import(key)
+    if imp:
+        lane, owner = imp
+        if not me["admin"]:
+            if owner and owner != me["business_id"]:
+                raise HTTPException(404, f"unknown scenario {key}")
+            owner = me["business_id"]
+        mine = _import_key(lane, owner) if owner else key
+        return {"scenario": mine, "items": _imported_stock(lane, owner or None), "labels": f"/labels/{mine}"}
+    items = _stock(key)
+    if not me["admin"]:
+        own = _my_sample_sellers(me, key)
+        items = [i for i in items if i["seller_id"] in own]
+    return {"scenario": key, "items": items, "labels": f"/labels/{key}"}
 
 
 @app.get("/api/qr.svg")
@@ -512,7 +634,7 @@ def labels(key: str, request: Request):
 
 
 @app.get("/api/data-quality")
-def data_quality():
+def data_quality(me=ADMIN):
     from collections import Counter
     rows = []
     for key in SC.SCENARIOS:
@@ -535,7 +657,7 @@ def data_quality():
 
 
 @app.get("/api/sim-summary")
-def sim_summary():
+def sim_summary(me=ADMIN):
     p = ROOT.parent / "research" / "sim_summary.json"
     if not p.exists():
         raise HTTPException(404, "research/sim_summary.json is missing")
@@ -577,50 +699,54 @@ def _run_import(req: ImportRequest, label="sample"):
 
 
 @app.get("/api/import/example/{lane}")
-def import_example(lane: Literal["durable", "fresh"]):
+def import_example(lane: Literal["durable", "fresh"], me=SELLER):
     name = f"{lane}_stock_example.csv"
     return FileResponse(EXAMPLES / name, media_type="text/csv", filename=name)
 
 
 @app.post("/api/import/preview")
-def import_preview(req: ImportRequest):
+def import_preview(req: ImportRequest, me=SELLER):
     """Check every row and sort the good ones into surplus and working stock. Nothing is stored."""
     return _run_import(req)
 
 
-def _list_surplus(lane: str, result: dict, label: str, source: str = IMP.SOURCE) -> int:
-    """Put an import's surplus on the marketplace: stock board, passports and QR codes. Same item id = updated."""
+def _list_surplus(lane: str, result: dict, label: str, source: str = IMP.SOURCE, owner: str = "") -> int:
+    """Put an import's surplus on the marketplace: stock board, passports and QR codes. Same item id from the same seller = updated."""
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(db()) as con, con:
         for s in result["surplus"]:
-            con.execute("INSERT OR REPLACE INTO imported_stock (lane, item_id, item, rules, label, listed_at, source) VALUES (?,?,?,?,?,?,?)",
-                        (lane, s["item"]["id"], json.dumps(s["item"]), json.dumps(s["rules"]), label, now, source))
+            con.execute("INSERT OR REPLACE INTO imported_stock (owner, lane, item_id, item, rules, label, listed_at, source) VALUES (?,?,?,?,?,?,?,?)",
+                        (owner, lane, s["item"]["id"], json.dumps(s["item"]), json.dumps(s["rules"]), label, now, source))
     return len(result["surplus"])
 
 
 @app.post("/api/import/list")
-def import_list(req: ListRequest):
-    """List the surplus items on the marketplace (stock board, passports, QR codes)."""
+def import_list(req: ListRequest, me=SELLER):
+    """List the surplus items on the marketplace (stock board, passports, QR codes), owned by this seller."""
     label = "measured" if req.measured else "sample"
     r = _run_import(req, label)
     if not r["surplus"]:
         _bad(ValueError("Nothing was found as surplus, so nothing was listed. Lower the thresholds or check the file."))
-    _list_surplus(req.lane, r, label)
-    key = f"import_{req.lane}"
+    _list_surplus(req.lane, r, label, owner=me["business_id"])
+    key = _import_key(req.lane, me["business_id"])
     return {"listed": len(r["surplus"]), "label": label, "stock_key": key, "items": _stock(key)}
 
 
 @app.post("/api/import/clear")
-def import_clear(lane: Literal["durable", "fresh"]):
+def import_clear(lane: Literal["durable", "fresh"], me=SELLER):
+    """Remove this seller's listed items in one lane. The admin removes every seller's."""
+    q, args = "DELETE FROM imported_stock WHERE lane=?", [lane]
+    if not me["admin"]:
+        q, args = q + " AND owner=?", args + [me["business_id"]]
     with closing(db()) as con, con:
-        n = con.execute("DELETE FROM imported_stock WHERE lane=?", (lane,)).rowcount
+        n = con.execute(q, args).rowcount
     return {"removed": n}
 
 
 @app.post("/api/import/cutting-job")
-def import_cutting_job(j: CuttingJob):
+def import_cutting_job(j: CuttingJob, me=SELLER):
     """Turn the next cutting job into a Sold-before-it's-cut request, checked by the engine before it is sent."""
-    g = gapfill_demo()
+    g = _gapfill_data()
     g["sheet"].update(length_mm=j.sheet_length_mm, width_mm=j.sheet_width_mm, thickness_mm=j.thickness_mm,
                       grade=j.grade.strip().upper())
     g["job"] = dict(part_name=j.part_name.strip() or "own part", length_mm=j.part_length_mm, width_mm=j.part_width_mm,
@@ -669,10 +795,21 @@ def _item_or_404(key: str, rid: str) -> dict:
     return item
 
 
+def _may_change(me: dict, key: str, rid: str) -> None:
+    """Only the seller who listed an item (or the admin) may change its photo."""
+    item = _item_or_404(key, rid)
+    if me["admin"]:
+        return
+    imp = _parse_import(key)
+    ok = imp[1] == me["business_id"] if imp else item["seller_id"] in _my_sample_sellers(me, key)
+    if not ok:
+        raise HTTPException(403, "Only the seller who listed this item can change its photo.")
+
+
 @app.post("/api/photo/{key}/{rid}")
-async def upload_photo(key: str, rid: str, request: Request):
+async def upload_photo(key: str, rid: str, request: Request, me=SELLER):
     """The seller's own photo of this item. The body is the image file itself (JPEG, PNG or WebP)."""
-    _item_or_404(key, rid)
+    _may_change(me, key, rid)
     ctype = request.headers.get("content-type", "").split(";")[0].strip().lower()
     data = await request.body()
     problem = _photo_problem(ctype, data)
@@ -712,7 +849,8 @@ def get_photo(key: str, rid: str):
 
 
 @app.delete("/api/photo/{key}/{rid}")
-def delete_photo(key: str, rid: str):
+def delete_photo(key: str, rid: str, me=SELLER):
+    _may_change(me, key, rid)
     f = _photo_file(key, rid)
     if f:
         f.unlink()
@@ -747,10 +885,12 @@ def _illustrative(item: dict) -> dict | None:
             "licence_url": c["licence_url"], "source_url": c["source_url"], "site": c.get("site", "Wikimedia Commons")}
 
 
-def _browse_scenario(key: str) -> tuple[list[dict], str]:
+def _browse_scenario(key: str, me: dict) -> tuple[list[dict], dict]:
+    """Every seller's stock in one sample cluster. Orders it fits and distances are this buyer's own (the admin: the cluster's)."""
     d = SC.dataset(key)
-    cfg, sellers, demands = d["settings"], {s.id: s for s in d["sellers"]}, d["demands"]
-    buyer = demands[0]  # distances are measured from the first open order's buyer in this sample cluster
+    cfg, sellers = d["settings"], {s.id: s for s in d["sellers"]}
+    demands = _my_demands(me, key)
+    here = _buyer_origin(me, key, demands)
     out = []
     for p in d["resources"]:
         eng, seller = REGISTRY[p.kind], sellers[p.seller_id]
@@ -759,14 +899,14 @@ def _browse_scenario(key: str) -> tuple[list[dict], str]:
         alt = {"value": round(kg * offer.price_per_kg, 2), "price_per_kg": offer.price_per_kg, "label": offer.label,
                "quoted_on": offer.quoted_on.isoformat() if offer.quoted_on else None}
         item = {**p.model_dump(mode="json"), "key": key, "seller_name": seller.name, "kg": round(kg, 2),
-                "distance_km": round(_dist((seller.x_km, seller.y_km), (buyer.x_km, buyer.y_km)), 1),
-                "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id)}
+                "distance_km": round(_dist((seller.x_km, seller.y_km), (here["x_km"], here["y_km"])), 1),
+                "approx_location": here["approx"], "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id)}
         if p.kind == "perishable":
             item["disposal"] = alt
         else:
             item["material_name"] = M_name(p.material)
             item["floor"] = alt
-            same = [x for x in demands if x.kind == p.kind and x.material == p.material]
+            same = [x for x in d["demands"] if x.kind == p.kind and x.material == p.material]  # sample prices, for the range
             low = min(same, key=lambda x: x.new_price_per_kg) if same else None  # the cautious ceiling
             item["ceiling"] = None if low is None else {"value": round(kg * low.new_price_per_kg, 2),
                                                         "price_per_kg": low.new_price_per_kg, "label": low.label,
@@ -783,23 +923,33 @@ def _browse_scenario(key: str) -> tuple[list[dict], str]:
                 break
             why = why or f"{dm.buyer_name}: {reason}"
         item["order"] = {"scenario": key, "index": fits[0], "demand_id": fits[1].id, "buyer_name": fits[1].buyer_name} if fits else None
-        item["order_reason"] = None if fits else (why or "No open order in this cluster takes this kind of stock.")
+        item["order_reason"] = None if fits else (why or (NO_ORDER if demands else NO_ORDER_YET))
         out.append(item)
-    return out, buyer.buyer_name
+    return out, here
 
 
-def _browse_imported(lane: str) -> list[dict]:
+NO_ORDER = "No open order in this cluster takes this kind of stock."
+NO_ORDER_YET = "You have no open order this could fill. Post a requirement and it is matched against this stock."
+NO_OWNER = "Saved before accounts existed, so it has no seller and is not matched."
+
+
+def _browse_imported(lane: str, me: dict) -> list[dict]:
+    """Items sellers listed themselves, each matched as its own seller. Rows saved before accounts: admin only."""
     from engine.models import PerishableLot
-    key = f"import_{lane}"
-    with closing(db()) as con:
-        rows = con.execute("SELECT * FROM imported_stock WHERE lane=? ORDER BY listed_at, item_id", (lane,)).fetchall()
+    names = _owner_names()
     out = []
-    for r in rows:
+    for r in _import_rows(lane):
+        owner = r["owner"]
+        if not owner and not me["admin"]:
+            continue
         p = (IMP.ImportedSheet if lane == "durable" else PerishableLot).model_validate_json(r["item"])
-        item = {**p.model_dump(mode="json"), "key": key, "label": r["label"], "seller_name": p.seller_id,
-                "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2), "distance_km": None,
+        key = _import_key(lane, owner)
+        item = {**p.model_dump(mode="json"), "key": key, "label": r["label"], "seller_name": names.get(owner) or p.seller_id,
+                "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2), "distance_km": None, "approx_location": False,
                 "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id), "rules": json.loads(r["rules"]),
-                "source": r["source"] or IMP.SOURCE, "match_seller": OWN_ID, **_own_order(p)}
+                "source": r["source"] or IMP.SOURCE, "match_seller": None, "order": None, "order_reason": NO_OWNER}
+        if owner:
+            item.update(_own_order(p, owner, me))
         if p.kind == "perishable":
             item["disposal"] = None
         else:
@@ -809,14 +959,15 @@ def _browse_imported(lane: str) -> list[dict]:
 
 
 @app.get("/api/browse/{lane}")
-def browse(lane: Literal["durable", "fresh"], request: Request):
-    """Every stock item in this lane as a marketplace listing: sample scenarios plus stock listed from a CSV import."""
+def browse(lane: Literal["durable", "fresh"], request: Request, me=BUYER):
+    """Every seller's stock in this lane as a marketplace listing: sample clusters plus items sellers listed themselves."""
     items, buyers = [], {}
     for key, sc in SC.SCENARIOS.items():
         if (sc["engine"] == "perishable") == (lane == "fresh"):
-            rows, buyers[key] = _browse_scenario(key)
+            rows, here = _browse_scenario(key, me)
+            buyers[key] = here["name"]
             items += rows
-    items += _browse_imported(lane)
+    items += _browse_imported(lane, me)
     if lane == "fresh":
         _safely(_sweep_fresh, _origin(request))
     for it in items:
@@ -846,6 +997,14 @@ def _slot_start(b: dict) -> datetime:
     return datetime.fromisoformat(f"{b['date']}T{b['slot'][:5]}")
 
 
+def _deal_for(me: dict, deal_id: int):
+    """A deal only its buyer, its sellers and the admin can see. Anyone else gets "deal not found"."""
+    row = _deal_row(deal_id)
+    if not _is_party(me, row):
+        raise HTTPException(404, "deal not found")
+    return row
+
+
 def _logistics(row, now: datetime | None = None) -> dict:
     """Re-run the engine on exactly the deal's sellers: same pickup order, vehicle and transport cost as when it was agreed."""
     key = row["scenario"] if row["scenario"] in SC.SCENARIOS else next(
@@ -853,6 +1012,7 @@ def _logistics(row, now: datetime | None = None) -> dict:
     if key is None:
         raise HTTPException(422, f"deal {row['id']} refers to order {row['demand_id']}, which is in no scenario")
     d = _dataset_with_own(key)
+    approx = set(_owned(key)["approx"])
     demand = next(x for x in d["demands"] if x.id == row["demand_id"])
     used = json.loads(row["sellers"])
     sellers = [x for x in d["sellers"] if x.id in used]
@@ -896,7 +1056,8 @@ def _logistics(row, now: datetime | None = None) -> dict:
                        "load_kg": b["kg_shipped"], "transport_cost": b["value"]["transport_T"],
                        "rate_multiplier": transport.rate_multiplier, "label": transport.label},
            "matches_deal": sorted(b["sellers_used"]) == sorted(used), "booking": booking, "slots": SLOTS,
-           "note": SIMULATED, "warnings": []}
+           "note": SIMULATED, "warnings": [],
+           "approx_location": any(c["seller_id"] in approx for c in collect) or demand.id in _approx_demands(key)}
     if row["kind"] == "perishable":
         now = now or datetime.now()
         wait = max(0.0, (_slot_start(booking) - now).total_seconds() / 3600) if booking else None
@@ -926,14 +1087,14 @@ def _logistics(row, now: datetime | None = None) -> dict:
 
 
 @app.get("/api/deals/{deal_id}/logistics")
-def deal_logistics(deal_id: int, now: datetime | None = None):
+def deal_logistics(deal_id: int, now: datetime | None = None, me=ANY):
     """Map, vehicle, schedule and collection list for one deal. `now` is only for testing the clock."""
-    return _logistics(_deal_row(deal_id), now)
+    return _logistics(_deal_for(me, deal_id), now)
 
 
 @app.post("/api/deals/{deal_id}/booking")
-def book_pickup(deal_id: int, bk: Booking, request: Request):
-    row = _deal_row(deal_id)
+def book_pickup(deal_id: int, bk: Booking, request: Request, me=ANY):
+    row = _deal_for(me, deal_id)
     if row["status"] != "agreed":
         raise HTTPException(409, f"the goods are already {row['status']}; a pickup can only be booked before collection")
     if bk.pickup_date < datetime.now().date():
@@ -960,9 +1121,19 @@ def _qty(it, lg):
     return f"{it['kg']:g} kg" if "kg" in it else f"{it['units']:g} {lg['part_name']}"
 
 
+def _deal_page(request: Request, deal_id: int):
+    """Printable deal papers: signed out goes to the start page; only the deal's buyer, its sellers and the admin may open them."""
+    sess = _session(request)
+    if sess is None:
+        return None
+    return _logistics(_deal_for(_me(sess), deal_id))
+
+
 @app.get("/deals/{deal_id}/pickup-sheet", response_class=HTMLResponse)
-def pickup_sheet(deal_id: int):
-    lg, e = _logistics(_deal_row(deal_id)), _html.escape
+def pickup_sheet(deal_id: int, request: Request):
+    lg, e = _deal_page(request, deal_id), _html.escape
+    if lg is None:
+        return RedirectResponse("/", status_code=307)
     v, bk = lg["vehicle"], lg["booking"]
     when = f"{bk['date']}, {bk['slot']}" if bk else "Not booked yet"
     rows = ""
@@ -978,13 +1149,16 @@ def pickup_sheet(deal_id: int):
             f'<div class="card"><h2 style="margin:0 0 8px">Collect, in this order</h2><table><tr><th>Stop</th><th>Seller</th><th>What to collect</th><th></th></tr>{rows}'
             f'<tr><td><b>{len(lg["collect"]) + 1}</b></td><td><b>Deliver to {e(lg["buyer"]["name"])}</b><br>Contact: ______________</td>'
             f'<td>All of the above, {v["load_kg"]:g} kg</td><td>Buyer sign:<br><br>______</td></tr></table>'
-            f'<p class="note">Positions are on a simple km grid from sample data; follow the real addresses. Contacts are left blank to fill in.</p></div>')
+            f'<p class="note">Positions are on a simple km grid from sample data; follow the real addresses. Contacts are left blank to fill in.'
+            f'{" Some stops use an approximate location from the business&#39;s area." if lg["approx_location"] else ""}</p></div>')
     return _doc(f"Pickup sheet {deal_id}", body)
 
 
 @app.get("/deals/{deal_id}/challan", response_class=HTMLResponse)
-def delivery_challan(deal_id: int):
-    lg, e = _logistics(_deal_row(deal_id)), _html.escape
+def delivery_challan(deal_id: int, request: Request):
+    lg, e = _deal_page(request, deal_id), _html.escape
+    if lg is None:
+        return RedirectResponse("/", status_code=307)
     bk, v = lg["booking"], lg["vehicle"]
     lines = "".join(f"<tr><td>{n}</td><td>{e(c['seller_name'])}</td><td><code>{e(i['resource_id'])}</code> {e(i['what'])}</td><td>{e(_qty(i, lg))}</td></tr>"
                     for n, (c, i) in enumerate(((c, i) for c in lg["collect"] for i in c["items"]), start=1))
@@ -1020,9 +1194,9 @@ def _default_folder(lane: str) -> Path:
     return ERP_DROP / lane
 
 
-def _folder_config(lane: str) -> dict:
+def _folder_config(lane: str, owner: str) -> dict:
     with closing(db()) as con:
-        row = con.execute("SELECT * FROM sync_folders WHERE lane=?", (lane,)).fetchone()
+        row = con.execute("SELECT * FROM sync_folders WHERE owner=? AND lane=?", (owner, lane)).fetchone()
     if row is None:
         return {"lane": lane, "path": str(_default_folder(lane)), "enabled": False, "measured": False,
                 "days_unused_limit": 30, "hours_left_limit": 24.0, "saved": False}
@@ -1030,26 +1204,27 @@ def _folder_config(lane: str) -> dict:
             "days_unused_limit": row["days_unused_limit"], "hours_left_limit": row["hours_left_limit"], "saved": True}
 
 
-def _log(lane, folder, file, status, rows_read=None, surplus=None, rejected=None, listed=None, label=None, message="", details=None):
+def _log(owner, lane, folder, file, status, rows_read=None, surplus=None, rejected=None, listed=None, label=None, message="", details=None):
     at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(db()) as con, con:
-        cur = con.execute("INSERT INTO sync_log (at, lane, folder, file, status, rows_read, surplus, rejected, listed, label, message, details)"
-                          " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (at, lane, folder, file, status, rows_read, surplus, rejected, listed,
-                                                                 label, message, json.dumps(details or [])))
+        cur = con.execute("INSERT INTO sync_log (owner, at, lane, folder, file, status, rows_read, surplus, rejected, listed, label, message, details)"
+                          " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (owner, at, lane, folder, file, status, rows_read, surplus, rejected, listed,
+                                                                   label, message, json.dumps(details or [])))
     return {"id": cur.lastrowid, "at": at, "lane": lane, "folder": folder, "file": file, "status": status, "rows_read": rows_read,
             "surplus": surplus, "rejected": rejected, "listed": listed, "label": label, "message": message, "details": details or []}
 
 
-def _sync_log(lane: str, limit: int = 20) -> list[dict]:
+def _sync_log(lane: str, owner: str, limit: int = 20) -> list[dict]:
+    """One seller's import history in a lane."""
     with closing(db()) as con:
-        rows = con.execute("SELECT * FROM sync_log WHERE lane=? ORDER BY id DESC LIMIT ?", (lane, limit)).fetchall()
+        rows = con.execute("SELECT * FROM sync_log WHERE lane=? AND IFNULL(owner, '')=? ORDER BY id DESC LIMIT ?", (lane, owner, limit)).fetchall()
     return [{**dict(r), "details": json.loads(r["details"] or "[]")} for r in rows]
 
 
-def _sync_folder(lane: str, background: bool = False) -> list[dict]:
-    """Import every new or changed .csv in the lane's folder. Unchanged files are never imported twice.
-    Files are only read; nothing in the folder is moved, changed or deleted."""
-    cfg = _folder_config(lane)
+def _sync_folder(lane: str, owner: str, background: bool = False) -> list[dict]:
+    """Import every new or changed .csv in this seller's folder for the lane. Unchanged files are never imported twice.
+    Files are only read; nothing in the folder is moved, changed or deleted. What is listed belongs to this seller."""
+    cfg = _folder_config(lane, owner)
     folder = Path(cfg["path"])
     if folder == _default_folder(lane):
         folder.mkdir(parents=True, exist_ok=True)  # only ever creates the project's own default folder
@@ -1059,12 +1234,12 @@ def _sync_folder(lane: str, background: bool = False) -> list[dict]:
         try:
             exports = conn.stock_csv(lane)
         except (ValueError, OSError) as e:
-            last = _sync_log(lane, 1)
+            last = _sync_log(lane, owner, 1)
             if background and last and last[0]["status"] == "error" and last[0]["message"] == str(e):
                 return []  # the same folder problem is logged once, not every minute
-            return [_log(lane, str(folder), "", "error", message=str(e))]
+            return [_log(owner, lane, str(folder), "", "error", message=str(e))]
         with closing(db()) as con:
-            seen = {r["file"]: r["fingerprint"] for r in con.execute("SELECT file, fingerprint FROM sync_seen WHERE lane=?", (lane,))}
+            seen = {r["file"]: r["fingerprint"] for r in con.execute("SELECT file, fingerprint FROM sync_seen WHERE owner=? AND lane=?", (owner, lane))}
         entries = []
         for ex in exports:
             where = str((folder / ex.name).resolve())
@@ -1077,20 +1252,25 @@ def _sync_folder(lane: str, background: bool = False) -> list[dict]:
                 try:
                     r = IMP.run_import(lane, ex.text, cfg["days_unused_limit"], cfg["hours_left_limit"], label)
                     entry = {"status": "imported", "rows_read": r["rows_read"], "surplus": len(r["surplus"]),
-                             "rejected": len(r["rejected"]), "listed": _list_surplus(lane, r, label), "label": label,
+                             "rejected": len(r["rejected"]), "listed": _list_surplus(lane, r, label, owner=owner), "label": label,
                              "message": "Changed file, imported again." if again else "New file.", "details": r["rejected"]}
                 except ValueError as e:
                     entry = {"status": "error", "message": str(e)}
             with closing(db()) as con, con:
-                con.execute("INSERT OR REPLACE INTO sync_seen (lane, file, fingerprint, imported_at) VALUES (?,?,?,?)",
-                            (lane, where, ex.fingerprint, datetime.now(timezone.utc).isoformat(timespec="seconds")))
-            entries.append(_log(lane, str(folder), ex.name, **entry))
+                con.execute("INSERT OR REPLACE INTO sync_seen (owner, lane, file, fingerprint, imported_at) VALUES (?,?,?,?,?)",
+                            (owner, lane, where, ex.fingerprint, datetime.now(timezone.utc).isoformat(timespec="seconds")))
+            entries.append(_log(owner, lane, str(folder), ex.name, **entry))
     return entries
 
 
 def sync_all_enabled() -> dict:
-    """One background pass: every lane whose folder sync is switched on."""
-    return {lane: _sync_folder(lane, background=True) for lane in ("durable", "fresh") if _folder_config(lane)["enabled"]}
+    """One background pass: every seller's folder whose sync is switched on. {lane: entries from every seller}."""
+    with closing(db()) as con:
+        on = con.execute("SELECT owner, lane FROM sync_folders WHERE enabled=1 ORDER BY lane, owner").fetchall()
+    out: dict[str, list] = {}
+    for r in on:
+        out.setdefault(r["lane"], []).extend(_sync_folder(r["lane"], r["owner"], background=True))
+    return out
 
 
 async def _autosync_loop():
@@ -1105,18 +1285,18 @@ async def _autosync_loop():
 
 
 @app.get("/api/connectors")
-def connectors():
+def connectors(me=SELLER):
     folders = {}
     for lane in ("durable", "fresh"):
-        cfg = _folder_config(lane)
-        last = _sync_log(lane, 1)
+        cfg = _folder_config(lane, me["business_id"])
+        last = _sync_log(lane, me["business_id"], 1)
         folders[lane] = {**cfg, "default_path": str(_default_folder(lane)), "last": last[0] if last else None}
     return {"connectors": [c.info() for c in CN.catalogue()], "works_with": WORKS_WITH, "every_seconds": SYNC_EVERY_SECONDS,
             "folder": folders}
 
 
 @app.put("/api/connectors/folder/{lane}")
-def save_folder(lane: Literal["durable", "fresh"], cfg: FolderConfig):
+def save_folder(lane: Literal["durable", "fresh"], cfg: FolderConfig, me=SELLER):
     folder = Path(cfg.path.strip().strip('"')).expanduser()
     if not folder.is_absolute():
         folder = ROOT.parent / folder
@@ -1126,29 +1306,30 @@ def save_folder(lane: Literal["durable", "fresh"], cfg: FolderConfig):
     if problem:
         _bad(ValueError(problem))
     with closing(db()) as con, con:
-        con.execute("INSERT OR REPLACE INTO sync_folders (lane, path, enabled, measured, days_unused_limit, hours_left_limit) VALUES (?,?,?,?,?,?)",
-                    (lane, str(folder), int(cfg.enabled), int(cfg.measured), cfg.days_unused_limit, cfg.hours_left_limit))
-    return _folder_config(lane)
+        con.execute("INSERT OR REPLACE INTO sync_folders (owner, lane, path, enabled, measured, days_unused_limit, hours_left_limit)"
+                    " VALUES (?,?,?,?,?,?,?)", (me["business_id"], lane, str(folder), int(cfg.enabled), int(cfg.measured),
+                                                cfg.days_unused_limit, cfg.hours_left_limit))
+    return _folder_config(lane, me["business_id"])
 
 
 @app.post("/api/connectors/folder/{lane}/sync")
-def sync_now(lane: Literal["durable", "fresh"]):
-    """Check the folder at once (the same check the background task runs every 60 seconds)."""
-    return {"entries": _sync_folder(lane), "log": _sync_log(lane)}
+def sync_now(lane: Literal["durable", "fresh"], me=SELLER):
+    """Check this seller's folder at once (the same check the background task runs every 60 seconds)."""
+    return {"entries": _sync_folder(lane, me["business_id"]), "log": _sync_log(lane, me["business_id"])}
 
 
 @app.get("/api/connectors/folder/{lane}/log")
-def sync_log(lane: Literal["durable", "fresh"], limit: int = 20):
-    return {"log": _sync_log(lane, max(1, min(limit, 200)))}
+def sync_log(lane: Literal["durable", "fresh"], limit: int = 20, me=SELLER):
+    return {"log": _sync_log(lane, me["business_id"], max(1, min(limit, 200)))}
 
 
 @app.post("/api/connectors/{key}/sync")
-def sync_connector(key: str, lane: Literal["durable", "fresh"] = "durable"):
+def sync_connector(key: str, lane: Literal["durable", "fresh"] = "durable", me=SELLER):
     c = next((x for x in CN.catalogue() if x.key == key), None)
     if c is None:
         raise HTTPException(404, f"unknown connector {key}")
     if key == "folder_sync":
-        return sync_now(lane)
+        return sync_now(lane, me)
     if key == "csv_upload":
         raise HTTPException(400, "CSV upload has no sync: upload a file with the form instead.")
     raise HTTPException(501, f"{c.name} is planned and not built yet. Use CSV upload or Auto-sync folder.")
@@ -1183,7 +1364,7 @@ def _decode_photo(url: str) -> tuple[str, bytes] | str:
 
 
 @app.get("/api/manual/options")
-def manual_options():
+def manual_options(me=SELLER):
     from typing import get_args
     from engine import materials as MAT
     from engine.models import Condition, FoodCategory, Storage
@@ -1192,12 +1373,12 @@ def manual_options():
 
 
 @app.post("/api/manual/{lane}")
-def manual_entry(lane: Literal["durable", "fresh"], m: ManualItem, now: datetime | None = None):
+def manual_entry(lane: Literal["durable", "fresh"], m: ManualItem, now: datetime | None = None, me=SELLER):
     """Check one hand-typed item with the importer, apply the surplus rules, and list it if it is surplus
     (or if the seller asks to list it anyway). An invalid item is never listed. `now` is only for tests."""
     fields = {k: v for k, v in m.fields.items() if k in IMP.COLUMNS[lane]}
     fields["item_id"] = str(fields.get("item_id") or "").strip() or _manual_id()
-    fields["seller_id"] = str(fields.get("seller_id") or "").strip() or ("My workshop" if lane == "durable" else "My kitchen")
+    fields["seller_id"] = str(fields.get("seller_id") or "").strip() or (me["name"] if not me["admin"] else "My workshop" if lane == "durable" else "My kitchen")
     errors = {}
     if lane == "fresh" and m.use_by is not None:
         hours = (m.use_by.replace(tzinfo=None) - (now or datetime.now()).replace(tzinfo=None)).total_seconds() / 3600
@@ -1220,23 +1401,39 @@ def manual_entry(lane: Literal["durable", "fresh"], m: ManualItem, now: datetime
            "kept_reason": r["kept_reason"], "urgent": r["urgent"], "label": label, "listed": listed, "source": IMP.MANUAL_SOURCE}
     if not listed:
         return {**out, "message": f"Not surplus: {r['kept_reason']}. It stays as working stock unless you list it anyway."}
-    key = f"import_{lane}"
-    _list_surplus(lane, {"surplus": [{"item": r["item"], "rules": rules}]}, label, IMP.MANUAL_SOURCE)
+    key = _import_key(lane, me["business_id"])
+    _list_surplus(lane, {"surplus": [{"item": r["item"], "rules": rules}]}, label, IMP.MANUAL_SOURCE, me["business_id"])
     out.update(listed_rules=rules, stock_key=key, passport=f"/passport/{key}/{r['item']['id']}",
                photo=_write_photo(key, r["item"]["id"], *photo) if photo else None)
     return out
 
 
-# ---------------- Your own stock in matching, and "What can this become?" ----------------
+# ---------------- Each seller's own stock in matching, and "What can this become?" ----------------
 from engine import become as BEC
 from engine.gapfill import GapFillPrices, StandingOrder
 from engine.models import FlatPiece, PerishableLot
 
-OWN_ID, OWN_NAME = "YOU", "Your workshop"
+OWN_ID, OWN_NAME = "YOU", "Your workshop"  # the admin's own test items (and rows saved before accounts)
+# Approximate positions of Chennai areas in km east and north of the city centre (Chennai Central), from rounded map
+# coordinates. Used only for businesses that sign up themselves; any other area is placed at the city centre.
+AREA_KM = {"Ambattur": (-12.6, 3.5), "Anna Nagar": (-6.6, 0.3), "Egmore": (-1.1, -1.1), "Saidapet": (-5.2, -6.8),
+           "Guindy": (-5.4, -8.4), "Porur": (-12.4, -4.9), "T Nagar": (-4.0, -4.5), "Velachery": (-5.7, -11.2),
+           "Perungudi": (-2.7, -13.0), "Tambaram": (-18.5, -17.4)}
+CITY_CENTRE = (0.0, 0.0)
+APPROX_NOTE = "approximate location"
+
+
+def _area_xy(area: str | None) -> tuple[float, float]:
+    """A business's area as approximate km coordinates; an area not in the list is the city centre."""
+    flat = re.sub(r"[^a-z]", "", (area or "").lower())
+    for name, xy in AREA_KM.items():
+        if re.sub(r"[^a-z]", "", name.lower()) in flat:
+            return xy
+    return CITY_CENTRE
 
 
 def _own_seller(d: dict) -> Seller:
-    """The seller's own business, placed at the centre of the cluster's sellers, with the cluster's sample scrap prices."""
+    """The admin's own items: a seller placed at the centre of the cluster's sellers, with the cluster's sample scrap prices."""
     xs, ys = [x.x_km for x in d["sellers"]], [x.y_km for x in d["sellers"]]
     salvage = {}
     for x in d["sellers"]:
@@ -1246,67 +1443,154 @@ def _own_seller(d: dict) -> Seller:
                   salvage=list(salvage.values()), fssai_licensed=False, label="sample")
 
 
-def _own_items(lane: str) -> list:
+def _accounts_by_bid() -> dict:
     with closing(db()) as con:
-        rows = con.execute("SELECT item, label FROM imported_stock WHERE lane=? ORDER BY listed_at, item_id", (lane,)).fetchall()
+        return {r["business_id"]: r for r in con.execute("SELECT * FROM users")}
+
+
+def _owner_names() -> dict[str, str]:
+    """business id -> business name, for sellers. The admin's own items keep the seller name typed with them."""
+    return {b: u["business_name"] for b, u in _accounts_by_bid().items() if u["role"] == "seller"}
+
+
+def _is_new_business(u) -> bool:
+    """A business that signed up itself (not a demo business, not the admin): its position comes from its area."""
+    return u is not None and u["role"] != "admin" and u["business_id"] not in _demo_accounts()
+
+
+def _owner_seller(owner: str, key: str, d: dict, accounts: dict) -> tuple[Seller, bool]:
+    """The seller an owner's items are matched as in one cluster, and whether its position is approximate.
+    A demo business that is already a seller in this sample cluster keeps its own id and place there. Any other business is
+    its own seller, named after the business, at its area's approximate position, with the cluster's sample scrap prices.
+    The admin's own items (and rows saved before accounts) are "Your workshop" at the cluster centre."""
+    u = accounts.get(owner)
+    if u is None or u["role"] == "admin":
+        return _own_seller(d), False
+    same = next((x for x in d["sellers"] if f"{key}:{x.id}" == owner or x.name == u["business_name"]), None)
+    if same is not None:
+        return same, False
+    x, y = _area_xy(u["area"])
+    return _own_seller(d).model_copy(update={"id": owner, "name": u["business_name"], "x_km": x, "y_km": y}), True
+
+
+def _own_items(lane: str, owner: str | None = None) -> list[tuple[str, object]]:
+    """(owner, item) for items listed in a lane: one owner's ("" = rows saved before accounts), or every owner's (None)."""
     out = []
-    for r in rows:
+    for r in _import_rows(lane, owner):
+        if owner is None and not r["owner"]:
+            continue  # saved before accounts: no seller to match it as
         data = {**json.loads(r["item"]), "label": r["label"] if r["label"] in ("measured", "sample") else "sample"}
         data.pop("days_unused", None)
-        out.append(FlatPiece(**data) if lane == "durable" else PerishableLot(**data))
+        out.append((r["owner"], FlatPiece(**data) if lane == "durable" else PerishableLot(**data)))
     return out
 
 
-def _own_resources(key: str) -> list:
-    """Imported, auto-synced and hand-entered items as "Your workshop" stock for one scenario (ids prefixed YOU-)."""
+def _owned(key: str) -> dict:
+    """Every owner's listed items for one cluster, ready for the engine: new sellers, resources (ids "<seller id>-<item id>"),
+    where each resource came from, and which sellers have only an approximate position."""
     eng = SC.SCENARIOS[key]["engine"]
     lane = "fresh" if eng == "perishable" else "durable"
-    return [x.model_copy(update={"id": f"{OWN_ID}-{x.id}", "seller_id": OWN_ID}) for x in _own_items(lane) if x.kind == eng]
+    d, accounts = SC.dataset(key), _accounts_by_bid()
+    sample = {x.id for x in d["sellers"]}
+    out = {"sellers": [], "resources": [], "origin": {}, "approx": []}
+    for owner, item in _own_items(lane):
+        if item.kind != eng:
+            continue
+        seller, approx = _owner_seller(owner, key, d, accounts)
+        if seller.id not in sample and all(s.id != seller.id for s in out["sellers"]):
+            out["sellers"].append(seller)
+            if approx:
+                out["approx"].append(seller.id)
+        rid = f"{seller.id}-{item.id}"
+        out["resources"].append(item.model_copy(update={"id": rid, "seller_id": seller.id}))
+        out["origin"][rid] = (owner, item.id)
+    return out
 
 
 def _dataset_with_own(key: str) -> dict:
+    """The sample cluster plus every buyer's posted requirements and every seller's listed items."""
     d = SC.dataset(key)
     d["demands"] = d["demands"] + [r["demand_obj"] for r in _requirements(scenario=key)]
-    own = _own_resources(key)
-    if own:
-        d["sellers"] = d["sellers"] + [_own_seller(d)]
-        d["resources"] = d["resources"] + own
+    own = _owned(key)
+    d["sellers"] = d["sellers"] + own["sellers"]
+    d["resources"] = d["resources"] + own["resources"]
     return d
 
 
 @app.get("/api/own-stock/{key}")
-def own_stock(key: str):
-    """Your own listed items as stock from "Your workshop", to add to a scenario before matching. Empty if there are none."""
+def own_stock(key: str, me=BUYER):
+    """Items sellers listed themselves, to add to a cluster before matching: each owner is its own seller, named after the
+    business (a demo business already in the cluster keeps its place there). Empty if there are none."""
     if key not in SC.SCENARIOS:
         raise HTTPException(404, f"unknown scenario {key}")
+    own = _owned(key)
+    return {"sellers": [s.model_dump(mode="json") for s in own["sellers"]],
+            "resources": [x.model_dump(mode="json") for x in own["resources"]], "approximate": own["approx"],
+            "note": "Items sellers listed themselves. A business that signed up itself is placed at an approximate location "
+                    "from its area. Scrap prices are the cluster's sample prices."}
+
+
+def _my_sample_sellers(me: dict, key: str) -> set[str]:
+    """Sample seller ids in a cluster that are this business (its demo id, or the same business name)."""
+    if key not in SC.SCENARIOS:
+        return set()
+    return {x.id for x in SC.dataset(key)["sellers"] if f"{key}:{x.id}" == me["business_id"] or x.name == me["name"]}
+
+
+def _my_demands(me: dict, key: str) -> list:
+    """A buyer's own open orders in a cluster: its sample order (demo businesses) and the requirements it posted.
+    The admin: every sample order."""
     d = SC.dataset(key)
-    own = _own_resources(key)
-    return {"seller": _own_seller(d).model_dump(mode="json") if own else None,
-            "resources": [x.model_dump(mode="json") for x in own],
-            "note": "Your own items, placed at the centre of the cluster. Scrap prices are the cluster's sample prices."}
+    if me["admin"]:
+        return list(d["demands"])
+    sample = [x for x in d["demands"] if f"{key}:{x.buyer_id}" == me["business_id"]]
+    posted = [r["demand_obj"] for r in _requirements(scenario=key, owner=me["business_id"]) if r["status"] in ("open", "reserved")]
+    return sample + posted
 
 
-def _own_order(p) -> dict:
-    """For an own item on Browse surplus: the first open order it fits, matched as Your workshop, or the reason it fits none."""
-    eng, why = REGISTRY[p.kind], None
+def _buyer_origin(me: dict, key: str, demands: list) -> dict:
+    """Where distances are measured from: the buyer's own order; else a new business's area (approximate);
+    else the cluster's first order, named in distance_from."""
+    a = me["account"]
+    if a.get("approx_location") and not demands:
+        return {"x_km": a["x_km"], "y_km": a["y_km"], "name": me["name"], "approx": True}
+    x = demands[0] if demands else SC.dataset(key)["demands"][0]
+    return {"x_km": x.x_km, "y_km": x.y_km, "name": x.buyer_name, "approx": bool(a.get("approx_location"))}
+
+
+def _approx_demands(key: str) -> set[str]:
+    """Posted requirements whose buyer signed up itself, so their position is approximate."""
+    accounts = _accounts_by_bid()
+    return {r["demand_id"] for r in _requirements(scenario=key, include_closed=True) if _is_new_business(accounts.get(r["owner"]))}
+
+
+def _own_order(p, owner: str, me: dict) -> dict:
+    """For a listed item on Browse surplus: the first of this buyer's open orders it fits, matched as its owner's seller,
+    or the engine's reason it fits none. Also the distance to the buyer."""
+    eng, why, first = REGISTRY[p.kind], None, None
+    accounts = _accounts_by_bid()
     for key, sc in SC.SCENARIOS.items():
         if sc["engine"] != p.kind:
             continue
         d = SC.dataset(key)
-        seller = _own_seller(d)
-        for i, dm in enumerate(d["demands"]):
+        seller, approx = _owner_seller(owner, key, d, accounts)
+        demands = _my_demands(me, key)
+        here = _buyer_origin(me, key, demands)
+        place = {"match_seller": seller.id, "approx_location": approx or here["approx"],
+                 "distance_km": round(_dist((seller.x_km, seller.y_km), (here["x_km"], here["y_km"])), 1)}
+        first = first or place
+        for i, dm in enumerate(demands):
             if dm.kind != p.kind or not eng.relevant(p, dm):
                 continue
             reason = eng.check(p, dm, seller, d["settings"])
             if reason is None:
-                return {"order": {"scenario": key, "index": i, "demand_id": dm.id, "buyer_name": dm.buyer_name}, "order_reason": None,
-                        "distance_km": round(_dist((seller.x_km, seller.y_km), (d["demands"][0].x_km, d["demands"][0].y_km)), 1)}
+                return {**place, "order": {"scenario": key, "index": i, "demand_id": dm.id, "buyer_name": dm.buyer_name}, "order_reason": None}
             why = why or f"{dm.buyer_name}: {reason}"
-    return {"order": None, "order_reason": why or "No open order in this lane takes this kind of stock."}
+    return {**(first or {}), "order": None, "order_reason": why or NO_ORDER_YET}
 
 
 def _gap_standing() -> tuple[list, GapFillPrices]:
-    g = gapfill_demo()
+    g = _gapfill_data()
     return [StandingOrder(**o) for o in g["orders"]], GapFillPrices(**g["prices"])
 
 
@@ -1321,13 +1605,14 @@ def _reference_price(piece, demands: list, standing: list) -> tuple[float | None
 
 
 def _become(key: str, rid: str) -> dict:
-    if key in IMPORT_KEYS:
-        lane = IMPORT_KEYS[key]
-        res = next((x for x in _own_items(lane) if x.id == rid), None)
+    imp = _parse_import(key)
+    if imp:
+        lane, owner = imp
+        res = next((x for _, x in _own_items(lane, owner) if x.id == rid), None)
         if res is None:
             raise HTTPException(404, "no such item")
         scen = [k for k, v in SC.SCENARIOS.items() if v["engine"] == res.kind]
-        own = True
+        own, accounts = True, _accounts_by_bid()
     elif key in SC.SCENARIOS:
         res = next((x for x in SC.dataset(key)["resources"] if x.id == rid), None)
         if res is None:
@@ -1338,10 +1623,15 @@ def _become(key: str, rid: str) -> dict:
     standing, gp = _gap_standing()
     merged = None
     all_demands = []
+    approx = False
     for k in scen:
         d = SC.dataset(k)
         all_demands += d["demands"]
-        seller = _own_seller(d) if own else next(x for x in d["sellers"] if x.id == res.seller_id)
+        if own:
+            seller, far = _owner_seller(owner, k, d, accounts)
+            approx = approx or far
+        else:
+            seller = next(x for x in d["sellers"] if x.id == res.seller_id)
         cands = [BEC.Candidate(x, "order", BEC.order_label(x.buyer_name)) for x in d["demands"]]
         r = BEC.become(res, seller, cands, d["settings"], d["transport"])
         if merged is None:
@@ -1362,8 +1652,10 @@ def _become(key: str, rid: str) -> dict:
         merged["refused"] += extra["refused"]
         merged["reference_price_per_kg"] = price
     merged["options"].sort(key=lambda o: (o["source"] == "reference", o["value_above_scrap"] is None, -(o["value_above_scrap"] or 0)))
-    merged.update(key=key, seller_name=OWN_NAME if own else seller.name, own=own,
-                  note="Prices are sample data. Open orders and standing orders are sample orders; common parts have no buyer yet.")
+    note = "Prices are sample data. Open orders and standing orders are sample orders; common parts have no buyer yet."
+    if approx:
+        note += " Transport is worked out from an approximate location (the seller's area)."
+    merged.update(key=key, seller_name=first[0].name, own=own, approx_location=approx, note=note)
     if res.kind == "flat":
         merged["piece"] = {"length_mm": res.length_mm, "width_mm": res.width_mm, "thickness_mm": res.thickness_mm,
                            "defects": [x.model_dump() for x in res.defects]}
@@ -1373,7 +1665,7 @@ def _become(key: str, rid: str) -> dict:
 
 
 @app.get("/api/become/{key}/{rid}")
-def what_it_can_become(key: str, rid: str):
+def what_it_can_become(key: str, rid: str, me=ANY):
     """Every order, standing order or common part this one item could become, ranked by value above scrap."""
     return _become(key, rid)
 
@@ -1509,8 +1801,12 @@ def _build_demand(r: RequirementIn, req_id: int = 0):
     return (None if errors else demand), key, errors
 
 
-def _requirements(lane: str | None = None, scenario: str | None = None, include_closed: bool = False) -> list[dict]:
+def _requirements(lane: str | None = None, scenario: str | None = None, include_closed: bool = False,
+                  owner: str | None = None) -> list[dict]:
+    """Posted requirements, newest first. owner: only that buyer's (None: every buyer's, as matching and Gap Fill use them)."""
     q, args = "SELECT * FROM requirements WHERE 1=1", []
+    if owner is not None:
+        q, args = q + " AND IFNULL(owner, '')=?", args + [owner]
     if lane:
         q, args = q + " AND lane=?", args + [lane]
     if scenario:
@@ -1531,7 +1827,7 @@ def _requirements(lane: str | None = None, scenario: str | None = None, include_
         out.append({"id": r["id"], "demand_id": dem.id, "lane": r["lane"], "kind": r["kind"], "scenario": r["scenario"],
                     "created_at": r["created_at"], "needed_by": r["needed_by"], "standing": bool(r["standing"]), "status": status,
                     "status_text": text, "deal_id": r["deal_id"], "reserved": rv, "history": json.loads(r["history"]),
-                    "demand": dem.model_dump(mode="json"), "demand_obj": dem, "note": POSTED_NOTE})
+                    "demand": dem.model_dump(mode="json"), "demand_obj": dem, "note": POSTED_NOTE, "owner": r["owner"] or ""})
     return out
 
 
@@ -1569,7 +1865,7 @@ def _record_reservations(req: GapFillRequest, plan: dict, seller: str):
 
 
 @app.get("/api/requirements/options")
-def requirement_options():
+def requirement_options(me=BUYER):
     from typing import get_args
     from engine import materials as MAT
     from engine.models import Condition, FoodCategory, Storage
@@ -1597,16 +1893,20 @@ def requirement_options():
 
 
 @app.post("/api/requirements")
-def post_requirement(r: RequirementIn, request: Request):
-    """Check a buyer's requirement with the demand models and save it (as a standing order if asked)."""
+def post_requirement(r: RequirementIn, request: Request, me=BUYER):
+    """Check a buyer's requirement with the demand models and save it (as a standing order if asked), owned by this buyer.
+    A buyer's requirement always carries its own business name."""
+    if not me["admin"]:
+        r = r.model_copy(update={"fields": {**r.fields, "buyer_name": me["name"]}})
     demand, key, errors = _build_demand(r)
     if errors:
         raise HTTPException(422, {"message": "Some fields need fixing. Nothing was saved.", "errors": errors})
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(db()) as con, con:
-        cur = con.execute("INSERT INTO requirements (created_at, lane, kind, scenario, demand, needed_by, standing, status, history)"
-                          " VALUES (?,?,?,?,?,?,?,?,?)", (now, r.lane, r.kind, key, "{}", r.needed_by.isoformat() if r.needed_by else None,
-                                                           int(r.standing), "open", json.dumps([{"at": now, "status": "open"}])))
+        cur = con.execute("INSERT INTO requirements (created_at, lane, kind, scenario, demand, needed_by, standing, status, history, owner)"
+                          " VALUES (?,?,?,?,?,?,?,?,?,?)", (now, r.lane, r.kind, key, "{}", r.needed_by.isoformat() if r.needed_by else None,
+                                                             int(r.standing), "open", json.dumps([{"at": now, "status": "open"}]),
+                                                             me["business_id"]))
         rid = cur.lastrowid
         demand = demand.model_copy(update={"id": f"R{rid}"})
         con.execute("UPDATE requirements SET demand=? WHERE id=?", (demand.model_dump_json(), rid))
@@ -1614,25 +1914,32 @@ def post_requirement(r: RequirementIn, request: Request):
     return _public(next(x for x in _requirements(include_closed=True) if x["id"] == rid))
 
 
+def _mine(me: dict) -> str | None:
+    """The owner filter for this business: None for the admin (everything)."""
+    return None if me["admin"] else me["business_id"]
+
+
 @app.get("/api/requirements")
-def list_requirements(lane: Literal["durable", "fresh"] | None = None):
-    return {"requirements": [_public(r) for r in _requirements(lane=lane, include_closed=True)]}
+def list_requirements(lane: Literal["durable", "fresh"] | None = None, me=BUYER):
+    """This buyer's requirements. The admin sees every buyer's."""
+    return {"requirements": [_public(r) for r in _requirements(lane=lane, include_closed=True, owner=_mine(me))]}
 
 
 @app.get("/api/requirements/demands/{key}")
-def requirement_demands(key: str):
+def requirement_demands(key: str, me=BUYER):
     """The buyer's own posted requirements for Order and match (newest first, closed ones left out)."""
     if key not in SC.SCENARIOS:
         raise HTTPException(404, f"unknown scenario {key}")
-    return {"demands": [{**r["demand"], "requirement_id": r["id"], "status": r["status"]} for r in _requirements(scenario=key)]}
+    return {"demands": [{**r["demand"], "requirement_id": r["id"], "status": r["status"]}
+                        for r in _requirements(scenario=key, owner=_mine(me))]}
 
 
 @app.post("/api/requirements/{req_id}/close")
-def close_requirement(req_id: int):
+def close_requirement(req_id: int, me=BUYER):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     with closing(db()) as con, con:
-        row = con.execute("SELECT history FROM requirements WHERE id=?", (req_id,)).fetchone()
-        if row is None:
+        row = con.execute("SELECT history, owner FROM requirements WHERE id=?", (req_id,)).fetchone()
+        if row is None or not me["admin"] and (row["owner"] or "") != me["business_id"]:
             raise HTTPException(404, "no such requirement")
         con.execute("UPDATE requirements SET status='closed', history=? WHERE id=?",
                     (json.dumps(json.loads(row["history"]) + [{"at": now, "status": "closed"}]), req_id))
@@ -1705,9 +2012,10 @@ def notify(event: str, text: str, roles: list[str], businesses: list[str] | None
 
 
 def _passport_path(key: str, rid: str) -> str:
-    if rid.startswith(f"{OWN_ID}-"):
+    origin = _owned(key)["origin"].get(rid)  # a seller's listed item, matched as "<seller id>-<item id>"
+    if origin:
         lane = "fresh" if SC.SCENARIOS[key]["engine"] == "perishable" else "durable"
-        return f"/passport/import_{lane}/{rid[len(OWN_ID) + 1:]}"
+        return f"/passport/{_import_key(lane, origin[0])}/{origin[1]}"
     return f"/passport/{key}/{rid}"
 
 
@@ -1725,7 +2033,7 @@ def _notify_requirement_fit(demand, key: str, standing: bool, origin: str):
                                          "value": ps["gain_above_salvage"], "link": link, "label": demand.label}, {"name": ps["seller_name"]})
             notify("new_match", text, ["seller"], [ps["seller_name"]], item_id=demand.id)
     if standing and demand.kind == "flat":
-        g = gapfill_demo()
+        g = _gapfill_data()
         req = GapFillRequest(**g)
         _notify_gapfill(plan_gap_fill(req), {o.id: o for o in req.orders}, origin, OWN_NAME)
 
@@ -1777,7 +2085,8 @@ def _fresh_lots():
     d = SC.dataset("food")
     names = {x.id: x.name for x in d["sellers"]}
     out = [("food", r, names[r.seller_id]) for r in d["resources"]]
-    return out + [("import_fresh", r, r.seller_id) for r in _own_items("fresh")]
+    names = _owner_names()
+    return out + [(_import_key("fresh", o), r, names.get(o) or r.seller_id) for o, r in _own_items("fresh")]
 
 
 def _sweep_fresh(origin: str, now: datetime | None = None) -> int:
@@ -1841,19 +2150,30 @@ def _check_contact(c: dict, need_consent: bool) -> tuple[dict, dict]:
     return out, errors
 
 
+def _my_contact(me: dict, business: str | None) -> bool:
+    """A seller or buyer sees and changes only the numbers registered for its own business. The admin sees all."""
+    return me["admin"] or _norm_biz(business) == _norm_biz(me["name"])
+
+
 @app.get("/api/whatsapp/contacts")
-def whatsapp_contacts(role: str | None = None):
-    """Registered contacts with the phone masked. role filters the list (seller, buyer, food bank)."""
+def whatsapp_contacts(role: str | None = None, me=ANY):
+    """Registered contacts with the phone masked: this business's own, or every contact for the admin.
+    role filters the list (seller, buyer, food bank)."""
     with closing(db()) as con:
         rows = con.execute("SELECT * FROM whatsapp_contacts ORDER BY id DESC").fetchall()
     roles = None if not role else set(role.split(","))
-    return {"contacts": [_contact_out(r) for r in rows if roles is None or r["role"] in roles],
-            "businesses": _sample_businesses(), "alert_types": ALERT_TYPES, "roles": list(CONTACT_ROLES),
+    if me["admin"]:
+        known = {b["name"] for b in _sample_businesses()}
+        businesses = _sample_businesses() + [{"name": u["business_name"], "role": "seller" if u["role"] == "seller" else "buyer"}
+                                             for u in _accounts_by_bid().values() if u["role"] != "admin" and u["business_name"] not in known]
+    else:
+        businesses = [{"name": me["name"], "role": me["account"].get("contact_role", me["role"])}]
+    return {"contacts": [_contact_out(r) for r in rows if (roles is None or r["role"] in roles) and _my_contact(me, r["business"])],
+            "businesses": businesses, "alert_types": ALERT_TYPES, "roles": list(CONTACT_ROLES),
             "default_alerts": DEFAULT_ALERTS, "consent_text": CONSENT_TEXT}
 
 
-@app.post("/api/whatsapp/contacts")
-def add_whatsapp_contact(c: ContactIn, request: Request):
+def _add_contact(c: "ContactIn", request: Request) -> dict:
     vals, errors = _check_contact(c.model_dump(), need_consent=True)
     if not errors:
         with closing(db()) as con:
@@ -1871,9 +2191,32 @@ def add_whatsapp_contact(c: ContactIn, request: Request):
     return _contact_out(row)
 
 
+@app.post("/api/whatsapp/contacts")
+def add_whatsapp_contact(c: ContactIn, request: Request, me=ANY):
+    """A seller or buyer registers numbers for its own business; the admin for any business."""
+    if not me["admin"]:
+        c = c.model_copy(update={"business": me["name"]})
+    return _add_contact(c, request)
+
+
+@app.post("/register")
+def register_number(c: ContactIn, request: Request):
+    """The public registration form (/register, opened from a QR code): no sign-in, consent required."""
+    return _add_contact(c, request)
+
+
+def _contact_or_404(me: dict, con, cid: int):
+    row = con.execute("SELECT * FROM whatsapp_contacts WHERE id=?", (cid,)).fetchone()
+    if row is None or not _my_contact(me, row["business"]):
+        raise HTTPException(404, "no such contact")
+    return row
+
+
 @app.patch("/api/whatsapp/contacts/{cid}")
-def edit_whatsapp_contact(cid: int, c: ContactPatch):
+def edit_whatsapp_contact(cid: int, c: ContactPatch, me=ANY):
     given = {k: v for k, v in c.model_dump().items() if v is not None}
+    if not me["admin"]:
+        given.pop("business", None)  # a business edits only its own numbers, and they stay its own
     vals, errors = _check_contact({k: v for k, v in given.items() if k != "active"}, need_consent=False)
     if errors:
         raise HTTPException(422, {"message": "Some fields need fixing. Nothing was changed.", "errors": errors})
@@ -1882,8 +2225,7 @@ def edit_whatsapp_contact(cid: int, c: ContactPatch):
     if "alerts" in vals:
         vals["alerts"] = json.dumps(vals["alerts"])
     with closing(db()) as con, con:
-        if con.execute("SELECT id FROM whatsapp_contacts WHERE id=?", (cid,)).fetchone() is None:
-            raise HTTPException(404, "no such contact")
+        _contact_or_404(me, con, cid)
         if vals:
             con.execute(f"UPDATE whatsapp_contacts SET {', '.join(k + '=?' for k in vals)} WHERE id=?", (*vals.values(), cid))
         row = con.execute("SELECT * FROM whatsapp_contacts WHERE id=?", (cid,)).fetchone()
@@ -1891,12 +2233,11 @@ def edit_whatsapp_contact(cid: int, c: ContactPatch):
 
 
 @app.delete("/api/whatsapp/contacts/{cid}")
-def remove_whatsapp_contact(cid: int):
+def remove_whatsapp_contact(cid: int, me=ANY):
     with closing(db()) as con, con:
-        n = con.execute("DELETE FROM whatsapp_contacts WHERE id=?", (cid,)).rowcount
+        _contact_or_404(me, con, cid)
+        con.execute("DELETE FROM whatsapp_contacts WHERE id=?", (cid,))
         con.execute("DELETE FROM notifications WHERE contact_id=? AND status='ready'", (cid,))
-    if not n:
-        raise HTTPException(404, "no such contact")
     return {"removed": True}
 
 
@@ -1904,14 +2245,19 @@ class NotifStatus(BaseModel):
     status: Literal["opened", "sent", "skipped"]  # never "delivered" or "read": we only record what a person did
 
 
-@app.get("/api/whatsapp/notifications")
-def whatsapp_notifications(request: Request, status: str | None = None):
-    _safely(_sweep_fresh, _origin(request))
+def _my_notifications(me: dict) -> list:
+    """Alerts prepared for this business's own numbers (every alert for the admin)."""
     with closing(db()) as con:
         rows = con.execute("SELECT n.*, c.name AS c_name, c.business AS c_business, c.phone AS c_phone, c.role AS c_role "
                            "FROM notifications n LEFT JOIN whatsapp_contacts c ON c.id = n.contact_id ORDER BY n.id DESC").fetchall()
+    return [r for r in rows if me["admin"] or (r["c_business"] is not None and _my_contact(me, r["c_business"]))]
+
+
+@app.get("/api/whatsapp/notifications")
+def whatsapp_notifications(request: Request, status: str | None = None, me=ANY):
+    _safely(_sweep_fresh, _origin(request))
     out = []
-    for r in rows:
+    for r in _my_notifications(me):
         if status and r["status"] != status:
             continue
         out.append({"id": r["id"], "created_at": r["created_at"], "event": r["event"], "event_text": ALERT_TYPES.get(r["event"], r["event"]),
@@ -1923,19 +2269,18 @@ def whatsapp_notifications(request: Request, status: str | None = None):
 
 
 @app.get("/api/whatsapp/notifications/count")
-def whatsapp_ready_count(request: Request):
+def whatsapp_ready_count(request: Request, me=ANY):
     _safely(_sweep_fresh, _origin(request))
-    with closing(db()) as con:
-        return {"ready": con.execute("SELECT COUNT(*) FROM notifications WHERE status='ready'").fetchone()[0]}
+    return {"ready": sum(1 for r in _my_notifications(me) if r["status"] == "ready")}
 
 
 @app.post("/api/whatsapp/notifications/{nid}/status")
-def whatsapp_notification_status(nid: int, s: NotifStatus):
+def whatsapp_notification_status(nid: int, s: NotifStatus, me=ANY):
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     col = {"opened": "opened_at", "sent": "sent_at"}.get(s.status)
+    if all(r["id"] != nid for r in _my_notifications(me)):
+        raise HTTPException(404, "no such alert")
     with closing(db()) as con, con:
-        if con.execute("SELECT id FROM notifications WHERE id=?", (nid,)).fetchone() is None:
-            raise HTTPException(404, "no such alert")
         con.execute(f"UPDATE notifications SET status=?{', ' + col + '=?' if col else ''} WHERE id=?",
                     (s.status, now, nid) if col else (s.status, nid))
     return {"id": nid, "status": s.status, "status_text": STATUS_TEXT[s.status]}
@@ -1975,7 +2320,7 @@ bp.onchange=()=>{{document.getElementById("otherl").hidden=bp.value!=="__other";
 role.onchange=tick;bp.onchange();
 f.onsubmit=async ev=>{{ev.preventDefault();document.querySelectorAll(".err").forEach(x=>x.textContent="");
  const fd=new FormData(f),body={{business:bp.value==="__other"?fd.get("business_other"):bp.value,role:role.value,name:fd.get("name"),phone:fd.get("phone"),alerts:fd.getAll("alerts"),consent:fd.get("consent")==="on"}};
- const r=await fetch("/api/whatsapp/contacts",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify(body)}});const t=await r.json().catch(()=>({{}}));
+ const r=await fetch("/register",{{method:"POST",headers:{{"Content-Type":"application/json"}},body:JSON.stringify(body)}});const t=await r.json().catch(()=>({{}}));
  if(r.ok){{f.hidden=true;document.getElementById("msg").textContent="Registered: "+t.phone+" for "+t.business+". Alerts will appear on the laptop under Ready to send. You can turn them off anytime.";}}
  else{{const er=(t.detail&&t.detail.errors)||{{}};for(const k in er){{const x=document.getElementById("e-"+k);if(x)x.textContent=er[k];}}document.getElementById("msg").textContent=(t.detail&&t.detail.message)||"Something went wrong. Try again.";}}}};
 </script>"""
@@ -2153,6 +2498,9 @@ def _account(u) -> dict:
     a.setdefault("contact_role", "seller" if u["role"] == "seller" else "buyer")
     a["short_name"] = a["name"].split(", ")[0]
     a["initial"] = (a["short_name"][:1] or "?").upper()
+    if _is_new_business(u):  # placed from its area; every distance or pickup cost for it says "approximate location"
+        a["x_km"], a["y_km"] = _area_xy(u["area"])
+        a["approx_location"] = True
     return a
 
 
@@ -2169,6 +2517,59 @@ def _session(request: Request) -> dict | None:
         v = _user("business_id=? AND active=1", tok["view"])
         view = _account(v) if v is not None and v["role"] != "admin" else None
     return {"real": _account(u), "view": view, "user": u}
+
+
+def _me(sess: dict) -> dict:
+    """The business acting in a request: the admin's "View as" business if one is chosen, else the signed-in account."""
+    a = sess["view"] or sess["real"]
+    return {"role": a["role"], "business_id": a["business_id"], "name": a["name"], "admin": a["role"] == "admin",
+            "real_admin": sess["real"]["role"] == "admin", "account": a}
+
+
+# ---------------- Ownership of deals: both sides are stored, so both can see them ----------------
+def _scenario_of(demand_id: str) -> str | None:
+    return next((k for k in SC.SCENARIOS if any(x.id == demand_id for x in _dataset_with_own(k)["demands"])), None)
+
+
+def _requirement_owner(req_id: int) -> str:
+    with closing(db()) as con:
+        row = con.execute("SELECT owner FROM requirements WHERE id=?", (req_id,)).fetchone()
+    return (row["owner"] or "") if row else ""
+
+
+def _demand_owner(key: str | None, demand_id: str) -> str:
+    """The buying business of an order: whoever posted the requirement, or the demo business of a sample order ("" if none)."""
+    if re.fullmatch(r"R\d+", demand_id):
+        return _requirement_owner(int(demand_id[1:]))
+    if key not in SC.SCENARIOS:
+        return ""
+    d = next((x for x in SC.dataset(key)["demands"] if x.id == demand_id), None)
+    bid = f"{key}:{d.buyer_id}" if d else ""
+    return bid if bid in _accounts_by_bid() else ""
+
+
+def _seller_owners(key: str, seller_ids: list[str]) -> list[str]:
+    """The selling businesses behind a deal's seller ids: listed items' owners and demo businesses. Sample sellers without an
+    account have none."""
+    d, accounts, owned = _dataset_with_own(key), _accounts_by_bid(), _owned(key)
+    by_seller = {}
+    for rid, (owner, _) in owned["origin"].items():
+        by_seller.setdefault(next(r.seller_id for r in owned["resources"] if r.id == rid), set()).add(owner)
+    out = []
+    for sid in seller_ids:
+        found = set(by_seller.get(sid, set()))
+        s = next((x for x in d["sellers"] if x.id == sid), None)
+        if f"{key}:{sid}" in accounts:
+            found.add(f"{key}:{sid}")
+        elif s is not None:
+            found |= {b for b, u in accounts.items() if u["role"] == "seller" and u["business_name"] == s.name}
+        out += [b for b in sorted(found) if b not in out]
+    return out
+
+
+def _is_party(me: dict, row) -> bool:
+    """The deal's buyer, one of its sellers, or the admin. Deals saved before accounts have neither side: admin only."""
+    return me["admin"] or me["business_id"] in [row["buyer_business"] or "", *json.loads(row["seller_business"] or "[]")]
 
 
 def _session_out(sess: dict) -> dict:
@@ -2331,7 +2732,7 @@ def register(r: RegisterIn, request: Request, response: Response):
 
 
 @app.post("/api/auth/change-password")
-def change_password(b: PasswordIn, request: Request, response: Response):
+def change_password(b: PasswordIn, request: Request, response: Response, me=ANY):
     sess = _session(request)
     if sess is None:
         raise HTTPException(401, "Not signed in.")
@@ -2353,7 +2754,7 @@ def change_password(b: PasswordIn, request: Request, response: Response):
 
 
 @app.post("/api/session/view-as")
-def view_as(v: ViewAsIn, request: Request, response: Response):
+def view_as(v: ViewAsIn, request: Request, response: Response, me=REAL_ADMIN):
     """Admin only: see the app exactly as one business does, for a live demo."""
     sess = _session(request)
     if sess is None or sess["real"]["role"] != "admin":
@@ -2367,7 +2768,7 @@ def view_as(v: ViewAsIn, request: Request, response: Response):
 
 
 @app.delete("/api/session/view-as")
-def exit_view_as(request: Request, response: Response):
+def exit_view_as(request: Request, response: Response, me=REAL_ADMIN):
     sess = _session(request)
     if sess is None or sess["real"]["role"] != "admin":
         raise HTTPException(403, "Only the CIRCULATE admin can view the app as another business.")
@@ -2582,7 +2983,7 @@ def _profile(u) -> dict:
 
 
 @app.get("/api/account")
-def my_account(request: Request):
+def my_account(request: Request, me=ANY):
     sess = _session(request)
     if sess is None:
         raise HTTPException(401, "Not signed in.")
@@ -2599,7 +3000,7 @@ def _admin_only(request: Request) -> dict:
 
 
 @app.get("/api/admin/users")
-def admin_users(request: Request):
+def admin_users(request: Request, me=REAL_ADMIN):
     _admin_only(request)
     with closing(db()) as con:
         rows = con.execute("SELECT * FROM users ORDER BY role='admin' DESC, role, id").fetchall()
@@ -2611,7 +3012,7 @@ class ActiveIn(BaseModel):
 
 
 @app.post("/api/admin/users/{uid}/active")
-def admin_set_active(uid: int, a: ActiveIn, request: Request):
+def admin_set_active(uid: int, a: ActiveIn, request: Request, me=REAL_ADMIN):
     sess = _admin_only(request)
     if uid == sess["user"]["id"] and not a.active:
         raise HTTPException(422, "You cannot switch off your own admin account.")
@@ -2623,7 +3024,7 @@ def admin_set_active(uid: int, a: ActiveIn, request: Request):
 
 
 @app.post("/api/admin/users/{uid}/temp-password")
-def admin_temp_password(uid: int, request: Request):
+def admin_temp_password(uid: int, request: Request, me=REAL_ADMIN):
     """A new temporary password, shown once to the admin. Every existing session of that account stops working."""
     _admin_only(request)
     if _user("id=?", uid) is None:

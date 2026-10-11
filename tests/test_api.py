@@ -2,9 +2,16 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from conftest import sign_in
+from engine import scenarios as SC
 
 c = TestClient(app)
-KEYS = [s["key"] for s in c.get("/api/scenarios").json()]
+KEYS = list(SC.SCENARIOS)  # the API needs a session, and tests sign in only once the private database is in place
+
+
+@pytest.fixture(autouse=True)
+def _signed_in():
+    sign_in(c, "admin")
 
 
 @pytest.mark.parametrize("key", KEYS)

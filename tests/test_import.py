@@ -5,6 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 from engine.importer import run_import
 
 c = TestClient(main.app)
@@ -16,6 +17,7 @@ FRESH_HEAD = "item_id,seller_id,product,category,quantity_kg,storage,hours_left\
 @pytest.fixture(autouse=True)
 def temp_db(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB", tmp_path / "test.db")
+    sign_in(c, "admin")  # a fresh database each test: sign in again
 
 
 def preview(lane, text, **kw):

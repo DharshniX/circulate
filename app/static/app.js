@@ -308,16 +308,19 @@ function becomeHtml(b, top) {
 
 /* ---------------- Buyer: post a requirement, and my requirements ---------------- */
 const myBuyerName = () => SESSION && SESSION.role === "buyer" ? SESSION.business_name : "";
+const APPROX = "approximate location";
+/* A business that signed up itself is placed from its area; a demo business uses the cluster's sample map. */
+const myXY = c => SESSION && SESSION.approx_location ? [String(SESSION.x_km), String(SESSION.y_km)] : [String(c[0]), String(c[1])];
 function postDefaults(kind, O) {
   if (kind === "perishable") return {categories: ["vegetables"], quantity: "", storage_available: ["ambient"], min_hours_left_on_arrival: "6",
     buyer_type: SESSION && SESSION.buyer_type || "business", normal_price_per_kg: String(O.food_price ?? ""), buyer_fssai_licensed: false, needed_by: "", buyer_name: myBuyerName(),
-    x_km: String(O.centre.food[0]), y_km: String(O.centre.food[1])};
+    x_km: myXY(O.centre.food)[0], y_km: myXY(O.centre.food)[1]};
   if (kind === "linear") { const pr = O.profiles[0];
     return {part_name: "", profile: pr.profile, cut_length_mm: "", quantity: "", accepted_grades: [O.bar_grades[0]], accepted_conditions: [...O.default_conditions],
-      new_price_per_kg: String(pr.sample_price ?? ""), needed_by: "", buyer_name: myBuyerName(), x_km: String(O.centre.bars[0]), y_km: String(O.centre.bars[1])}; }
+      new_price_per_kg: String(pr.sample_price ?? ""), needed_by: "", buyer_name: myBuyerName(), x_km: myXY(O.centre.bars)[0], y_km: myXY(O.centre.bars)[1]}; }
   const m = O.materials.find(x => x.key === "mild_steel");
   return {part_name: "", material: "mild_steel", length_mm: "", width_mm: "", thickness_mm: "", accepted_grades: m.grades.slice(0, 1), accepted_conditions: [...O.default_conditions],
-    quantity: "", new_price_per_kg: String(m.sample_price ?? ""), needed_by: "", buyer_name: myBuyerName(), x_km: String(O.centre.steel[0]), y_km: String(O.centre.steel[1])};
+    quantity: "", new_price_per_kg: String(m.sample_price ?? ""), needed_by: "", buyer_name: myBuyerName(), x_km: myXY(O.centre.steel)[0], y_km: myXY(O.centre.steel)[1]};
 }
 async function vPost(el) {
   const O = await api("/api/requirements/options"), lane = st.lane;
@@ -355,10 +358,10 @@ async function vPost(el) {
       F.buyer_type !== "food_bank" ? `<label class="check mfield wide"><input type="checkbox" data-post-check="buyer_fssai_licensed" ${F.buyer_fssai_licensed ? "checked" : ""}> We hold an FSSAI licence or registration</label>` : ""];
   }
   const priceKey = kind === "perishable" ? "normal_price_per_kg" : "new_price_per_kg";
-  const g3 = [fld("buyer_name", "Your business name", txt("buyer_name", "e.g. Ezhil Engineering Works"), "wide"),
+  const g3 = [fld("buyer_name", "Your business name", SESSION.role === "buyer" ? `<input type="text" value="${esc(SESSION.business_name)}" readonly aria-readonly="true">` : txt("buyer_name", "e.g. Ezhil Engineering Works"), "wide"),
     fld("needed_by", "Needed by", `<input data-post="needed_by" type="date" min="${new Date().toISOString().slice(0, 10)}" value="${esc(F.needed_by)}" ${bad("needed_by")}>`),
     kind === "perishable" && F.buyer_type === "food_bank" ? "" : fld(priceKey, kind === "perishable" ? "What you pay your usual supplier (₹/kg)" : "What new material costs you (₹/kg)", num_(priceKey, "decimal")),
-    fld("x_km", "Your location: x (km on the demo map)", num_("x_km", "decimal")), fld("y_km", "Your location: y (km)", num_("y_km", "decimal"))];
+    fld("x_km", `Your location: x (km on the demo map${SESSION.approx_location ? `, ${APPROX} from your area` : ""})`, num_("x_km", "decimal")), fld("y_km", "Your location: y (km)", num_("y_km", "decimal"))];
   const msg = st.postMsg && st.postMsg.lane === lane ? `<div class="mres ok" role="status"><b>Saved as a standing order (${esc(st.postMsg.demand_id)})</b><p>Workshops see it in Sold before it's cut, and it shows in "What can this become?" as "Ordered by ${esc(short(st.postMsg.buyer))}".</p><div class="ctrl"><button class="btn sm" type="button" id="toReqs">See my requirements</button></div></div>` : "";
   el.innerHTML = `<div class="card"><form id="postForm" class="form" novalidate>
       <div class="ctrl"><h2>Your requirement</h2>${badge("sample", "Demo")}${lane === "durable" ? `<div class="grow"></div><div class="opts kindsw" role="radiogroup" aria-label="What kind of part"><label><input type="radio" name="postKind" value="flat" ${kind === "flat" ? "checked" : ""}>Sheet parts</label><label><input type="radio" name="postKind" value="linear" ${kind === "linear" ? "checked" : ""}>Bars and tubes</label></div>` : ""}</div>
@@ -376,7 +379,7 @@ async function vPost(el) {
     if (i.dataset.post === "material") {  // new material: its grades and sample price
       const m = O.materials.find(x => x.key === i.value);
       F.accepted_grades = m.grades.slice(0, 1); F.new_price_per_kg = String(m.sample_price ?? "");
-      const c = O.centre[i.value === "mild_steel" ? "steel" : "sheets"]; F.x_km = String(c[0]); F.y_km = String(c[1]);
+      [F.x_km, F.y_km] = myXY(O.centre[i.value === "mild_steel" ? "steel" : "sheets"]);
       render();
     }
     if (i.dataset.post === "profile") { const pr = O.profiles.find(x => x.profile === i.value); F.new_price_per_kg = String(pr.sample_price ?? ""); }
@@ -477,7 +480,7 @@ function itemMedia(it) {
   return `<div class="media draw">${pieceSvg(it)}</div>`;
 }
 function productCard(it, lane) {
-  const uid = `${it.key}:${it.id}`, dist = it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km away`;
+  const uid = `${it.key}:${it.id}`, dist = it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km away${it.approx_location ? ` (${APPROX})` : ""}`;
   return `<article class="pcard" tabindex="0" data-open="${esc(uid)}" aria-label="${esc(itemTitle(it))}">${itemMedia(it)}
     <div class="pbody"><div class="ptitle"><h3>${esc(itemTitle(it))}</h3>${labelChip(it.label)}</div>
       ${specChips(it)}${it.kind === "perishable" ? freshBar(it.hours_left) : ""}${priceLine(it)}
@@ -491,7 +494,7 @@ async function openItem(it, focusBecome) {
     ? [["Product", it.product], ["Category", words(it.category)], ["Quantity", `${num(it.quantity_kg, 1)} kg`], ["Storage", words(it.storage)], ["Shelf life left", `${num(it.hours_left, 1)} hours`]]
     : it.kind === "flat" ? [["Material", `${it.material_name}, ${it.grade}`], ["Size", `${num(it.length_mm)} × ${num(it.width_mm)} mm`], ["Thickness", `${num(it.thickness_mm, it.thickness_mm % 1 ? 1 : 0)} mm`], ["Condition", words(it.condition)], ["Weight", `${num(it.kg, 1)} kg`]]
     : [["Profile", cap1(it.profile)], ["Length", `${num(it.length_mm)} mm`], ["Material", `${it.material_name}, ${it.grade}`], ["Condition", words(it.condition)], ["Weight", `${num(it.kg, 1)} kg`]];
-  specs.push(["Seller", it.seller_name], ["Distance", it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km`], ["Item", it.id]);
+  specs.push(["Seller", it.seller_name], ["Distance", it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km${it.approx_location ? ` (${APPROX})` : ""}`], ["Item", it.id]);
   const d = drawer.open(esc(itemTitle(it)), `${photoHtml(it)}
     <div class="ctrl">${labelChip(it.label)}${it.rules ? `<span class="pill p-mut" title="${esc(it.rules.join("; "))}">${esc(it.source || "Imported")}</span>` : ""}</div>
     ${priceLine(it)}${it.kind === "perishable" ? freshBar(it.hours_left) : ""}
@@ -510,7 +513,7 @@ async function openItem(it, focusBecome) {
 async function orderFrom(it) {
   const k = it.order.scenario, S = await scen(k), lane = it.kind === "perishable" ? "fresh" : "durable";
   st.scen[lane] = k; st.ordId[k] = it.order.demand_id;
-  st.off[k] = new Set(S.data.sellers.map(x => x.id).filter(id => id !== (it.match_seller || it.seller_id)));
+  st.off[k] = null; st.only = {k, id: it.match_seller || it.seller_id};  // vMatch ticks only this seller
   go({view: "match"});
 }
 async function vBrowse(el) {
@@ -567,12 +570,20 @@ async function vBrowse(el) {
 async function vMatch(el) {
   const k = laneScen(), S = await scen(k), fresh = S.meta.engine === "perishable";
   const posted = (await api(`/api/requirements/demands/${k}`)).demands;  // the buyer's own requirements first
-  const allD = [...posted, ...S.data.demands];
+  const allD = [...posted, ...S.data.demands];  // a buyer gets only its own orders; the admin gets every sample order
+  if (!allD.length) {
+    el.innerHTML = `<div class="card noprint"><div class="ctrl">${await scenSeg()}</div></div>` + emptyState("layers", "You have no open order in this material yet. Post a requirement and it is matched against every seller's stock.", `<button class="btn pri" type="button" id="toPost">${ic("file-plus-2")}Post a requirement</button>`);
+    bindScen(el); $("#toPost", el).onclick = () => go({view: "post"});
+    return;
+  }
   const d = allD.find(x => x.id === st.ordId[k]) || allD[0];
-  const off = st.off[k] || (st.off[k] = new Set());
   const rate = st.rate[k] ?? 1;
-  const own = await api(`/api/own-stock/${k}`);  // imported, auto-synced and hand-entered items, as "Your workshop"
-  const D = {...S.data, demands: allD, ...(own.resources.length ? {sellers: [...S.data.sellers, own.seller], resources: [...S.data.resources, ...own.resources]} : {})};
+  const own = await api(`/api/own-stock/${k}`);  // items sellers listed themselves: each owner is its own seller
+  const D = {...S.data, demands: allD, sellers: [...S.data.sellers, ...own.sellers], resources: [...S.data.resources, ...own.resources]};
+  if (st.only && st.only.k === k) { st.off[k] = new Set(D.sellers.map(x => x.id).filter(id => id !== st.only.id)); st.only = null; }
+  const off = st.off[k] || (st.off[k] = new Set());
+  const approx = new Set(own.approximate);
+  const approxNote = ids => ids.some(id => approx.has(id)) ? ` <span class="note">(${APPROX} for ${ids.filter(id => approx.has(id)).map(id => esc(short(sellerName(id)))).join(", ")})</span>` : "";
   const data = structuredClone(D);
   data.transport.rate_multiplier = rate;
   const sellerIds = D.sellers.map(s => s.id).filter(id => !off.has(id));
@@ -591,9 +602,9 @@ async function vMatch(el) {
   if (!b) h += `<div class="card">${emptyState("circle-x", `No seller can supply ${esc(orderName(d))} right now. ${esc(f.message)}`)}${fold(`Why each piece was refused (${f.rejections.length})`, rejList(f))}</div>`;
   else {
     const v = b.value, n = b.sellers_used.length, unit = fresh ? "kg" : f.unit_name;
-    const what = `${num(b.units, fresh ? 1 : 0)} ${unit} from ${n} seller${n === 1 ? "" : "s"}, ${num(b.route_km, 1)} km pickup by ${esc(b.vehicle || "vehicle")}${b.trips > 1 ? ` (${b.trips} trips)` : ""}.`;
+    const what = `${num(b.units, fresh ? 1 : 0)} ${unit} from ${n} seller${n === 1 ? "" : "s"}, ${num(b.route_km, 1)} km pickup by ${esc(b.vehicle || "vehicle")}${b.trips > 1 ? ` (${b.trips} trips)` : ""}.${approxNote(b.sellers_used)}`;
     h += `<div class="card"><div class="hero">
-        <div class="stack" style="gap:12px"><div class="ctrl">${f.feasible ? `<span class="pill p-ok">${ic("circle-check", "sm")}Fully matched</span>` : `<span class="pill p-warn">${ic("triangle-alert", "sm")}Short by ${num(f.shortfall, 1)} ${esc(unit)}</span>`}${v.is_donation ? `<span class="pill p-pe">Donation</span>` : ""}${badge("sample")}</div>
+        <div class="stack" style="gap:12px"><div class="ctrl">${f.feasible && !(f.shortfall > 0) ? `<span class="pill p-ok">${ic("circle-check", "sm")}Fully matched</span>` : `<span class="pill p-warn">${ic("triangle-alert", "sm")}Short by ${num(f.shortfall, 1)} ${esc(unit)}</span>`}${v.is_donation ? `<span class="pill p-pe">Donation</span>` : ""}${badge("sample")}</div>
           <h2>${esc(orderName(d))} ${codeTag(d.id)}</h2>
           <p class="hero-sub">${what}</p>
           ${v.is_donation ? `<div><div class="hero-num">${inr(-v.salvage_value_S)}</div><p class="hero-sub">disposal cost avoided, for ${inr(v.transport_T)} transport</p></div>`
@@ -604,7 +615,7 @@ async function vMatch(el) {
     const capOf = id => f.seller_capacity.find(c => c.seller_id === id) || {};
     h += `<div class="stack" style="gap:12px"><h2>Who supplies it</h2><div class="pgrid" style="grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr))">${b.per_seller.map(p => `<div class="card" style="gap:12px">
         <div class="ctrl" style="gap:10px">${ic("building-2", "lg")}<div><b>${esc(short(p.seller_name))}</b><div class="note">${esc(p.seller_name.split(", ")[1] || "")}</div></div></div>
-        <div class="statrow tight"><div class="stat"><b>${num(p.units, fresh ? 1 : 0)}</b><span>${esc(unit)}</span></div><div class="stat"><b>${num(p.kg_shipped, 1)}</b><span>kg collected</span></div><div class="stat"><b>${num(capOf(p.seller_id).distance_km, 1)}</b><span>km away</span></div></div></div>`).join("")}</div></div>`;
+        <div class="statrow tight"><div class="stat"><b>${num(p.units, fresh ? 1 : 0)}</b><span>${esc(unit)}</span></div><div class="stat"><b>${num(p.kg_shipped, 1)}</b><span>kg collected</span></div><div class="stat"><b>${num(capOf(p.seller_id).distance_km, 1)}</b><span>km away${approx.has(p.seller_id) ? `, ${APPROX}` : ""}</span></div></div></div>`).join("")}</div></div>`;
     const sheets = b.allocations.filter(a => a.shape === "sheet" && a.parts && a.parts.length);
     if (sheets.length) h += `<div class="card"><div class="section-title"><h2>Cutting plans</h2><span class="mut">${sheets.length} piece${sheets.length === 1 ? "" : "s"}</span></div>
       <p class="mut">Each grey shape is a seller's piece, drawn to scale. The yellow parts are placed with a ${num(S.data.settings.kerf_mm, 1)} mm ${term("blade gap", "kerf")} and a ${num(S.data.settings.edge_margin_mm)} mm edge strip that is never cut; red marks a defect the plan avoids.</p>
@@ -658,14 +669,14 @@ async function vDeals(el, admin) {
     return;
   }
   const step = s => ({agreed: 1, dispatched: 2, delivered: 3})[s];
-  let h = tiles + `<div class="card"><div class="ctrl"><h2>${admin ? "All deals" : "Your deals"}</h2><div class="grow"></div><button class="btn sm" id="resetDeals" type="button">Clear demo deals</button></div><div class="scroll"><table><tr><th>Deal</th><th>Buyer</th><th>Sellers</th><th>Lane</th><th>Stage</th><th>Data</th><th>Next step</th></tr>${ds.map(x => `<tr ${x.id === st.lastDeal ? 'class="sel"' : ""}><td>#${x.id}</td><td>${esc(x.buyer_name)}</td><td>${x.sellers.map(esc).join(", ")}</td><td>${x.kind === "perishable" ? "Fresh" : "Durable"}</td><td><span class="pill ${x.status === "delivered" ? "p-ok" : "p-mut"}">${step(x.status)}/3 ${esc(x.status)}</span></td><td>${chip(x.is_simulated ? "simulated" : "verified")}</td><td>${
+  let h = tiles + `<div class="card"><div class="ctrl"><h2>${admin ? "All deals" : "Your deals"}</h2><div class="grow"></div>${SESSION.role === "admin" ? `<button class="btn sm" id="resetDeals" type="button">Clear demo deals</button>` : ""}</div><div class="scroll"><table><tr><th>Deal</th><th>Buyer</th><th>Sellers</th><th>Lane</th><th>Stage</th><th>Data</th><th>Next step</th></tr>${ds.map(x => `<tr ${x.id === st.lastDeal ? 'class="sel"' : ""}><td>#${x.id}</td><td>${esc(x.buyer_name)}</td><td>${(x.seller_names || x.sellers).map(n => esc(short(n))).join(", ")}</td><td>${x.kind === "perishable" ? "Fresh" : "Durable"}</td><td><span class="pill ${x.status === "delivered" ? "p-ok" : "p-mut"}">${step(x.status)}/3 ${esc(x.status)}</span></td><td>${chip(x.is_simulated ? "simulated" : "verified")}</td><td>${
     x.status === "agreed" ? `<button class="btn sm" data-dispatch="${x.id}" type="button">Seller marks dispatched</button>` :
     x.status === "dispatched" ? `<span class="ctrl"><input aria-label="Delivery evidence" placeholder="Challan no., e.g. DC-104" data-ev="${x.id}" style="width:170px"><label class="check note"><input type="checkbox" data-conf="${x.id}"> buyer confirms</label><button class="btn sm" data-deliver="${x.id}" type="button">Mark delivered</button></span>` : "Done"}</td></tr>`).join("")}</table></div><p id="dealMsg" class="note" aria-live="polite">A simulated deal stays simulated even after delivery evidence is added.</p></div>`;
   const sel = ds.find(x => x.id === st.lastDeal) || ds[0];
   h += `<div class="card"><h2>Impact ledger: deal #${sel.id}</h2><div class="scroll"><table><tr><th>Measure</th><th class="n">Value</th><th>Label</th></tr>${(sel.impact.metrics || []).map(m => `<tr><td class="w">${esc(m.metric)}${m.note ? `<div class="note">${esc(m.note)}</div>` : ""}${m.source ? `<div class="note">${esc(m.source)}</div>` : ""}</td><td class="n">${m.value == null ? "–" : m.unit === "INR" ? inr(m.value) : num(m.value, 1) + " " + esc(m.unit)}</td><td>${chip(m.label)}</td></tr>`).join("")}</table></div><p class="note">CO₂ stays empty until a cited emission factor is entered. No landfill diversion is claimed for metals, because they are recycled anyway.</p></div>`;
   el.innerHTML = h;
   const msg = t => { $("#dealMsg", el).innerHTML = t; };
-  $("#resetDeals", el).onclick = async () => { await api("/api/reset", {}); st.lastDeal = null; render(); };
+  const rd = $("#resetDeals", el); if (rd) rd.onclick = async () => { await api("/api/reset", {}); st.lastDeal = null; render(); };
   el.querySelectorAll("[data-dispatch]").forEach(b => b.onclick = async () => {
     try { await api(`/api/deals/${b.dataset.dispatch}/advance`, {status: "dispatched"}); st.lastDeal = +b.dataset.dispatch; render(); } catch (e) { msg(`<span class="err">${esc(e.message)}</span>`); }
   });
@@ -1079,9 +1090,9 @@ async function vStock(el) {
     return `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(url)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td>${fresh ? `<td style="min-width:140px"><div class="bar ${x.hours_left < 12 ? "warn" : "pe"}"><i style="width:${Math.max(3, Math.min(1, x.hours_left / maxH) * 100)}%"></i></div><span class="note">${num(x.hours_left)} h</span></td>` : ""}<td class="n">${num(x.kg, 1)}</td><td class="n">${inr(x.scrap_value)}</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/${k}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`;
   }).join("")}</table></div>` : `<div class="empty">No stock for this seller.</div>`}
   <p class="note">Each QR opens the item's passport on this computer's address. For phones on the same Wi-Fi, open the app at the laptop's network address (see README) before printing labels.</p></div>`;
-  if (imp.items.length) h = `<div class="card"><div class="ctrl"><h2>Listed from your import (${imp.items.length})</h2><div class="grow"></div><a class="btn" href="/labels/import_${st.lane}" target="_blank" rel="noopener">Print QR labels</a><button class="btn" id="impClear" type="button">Remove imported stock</button></div>
+  if (imp.items.length) h = `<div class="card"><div class="ctrl"><h2>Listed from your import (${imp.items.length})</h2><div class="grow"></div><a class="btn" href="${esc(imp.labels)}" target="_blank" rel="noopener">Print QR labels</a><button class="btn" id="impClear" type="button">${SESSION.role === "admin" ? "Remove every seller's listed stock" : "Remove my listed stock"}</button></div>
     <p class="mut">Listed from Connect your system: a CSV import, the auto-sync folder, or an item added by hand.</p>
-    <div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th><th>Found by</th><th class="n">kg</th><th class="n">Scrap value</th><th>Data</th><th class="noprint"></th></tr>${imp.items.map(x => `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(location.origin + x.passport)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td><td class="n">${num(x.kg, 1)}</td><td class="n">–</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/import_${st.lane}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`).join("")}</table></div>
+    <div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th><th>Found by</th><th class="n">kg</th><th class="n">Scrap value</th><th>Data</th><th class="noprint"></th></tr>${imp.items.map(x => `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(location.origin + x.passport)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td><td class="n">${num(x.kg, 1)}</td><td class="n">–</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/${encodeURIComponent(x.key)}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`).join("")}</table></div>
     <p class="note">No scrap price is shown for imported items until a dated quote is entered.</p></div>` + h;
   el.innerHTML = h;
   bindScen(el);
@@ -1134,7 +1145,7 @@ async function vPickup(el) {
   const tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10), today = new Date().toISOString().slice(0, 10);
   const cap = (v.payload_kg || 0) * (v.trips || 1);
   let h = `<p class="callout note">Transporters and bookings are simulated in this prototype. No live booking with any logistics company.</p>
-    <div class="card noprint"><div class="ctrl"><label class="field">Deal<select id="pkDeal">${mine.map(d => `<option value="${d.id}" ${d.id === id ? "selected" : ""}>#${d.id} · ${esc(d.buyer_name)} · from ${d.sellers.map(esc).join(", ")}</option>`).join("")}</select></label>
+    <div class="card noprint"><div class="ctrl"><label class="field">Deal<select id="pkDeal">${mine.map(d => `<option value="${d.id}" ${d.id === id ? "selected" : ""}>#${d.id} · ${esc(d.buyer_name)} · from ${(d.seller_names || d.sellers).map(n => esc(short(n))).join(", ")}</option>`).join("")}</select></label>
       <div class="grow"></div><a class="btn" href="/deals/${id}/pickup-sheet" target="_blank" rel="noopener">Print pickup sheet</a><a class="btn" href="/deals/${id}/challan" target="_blank" rel="noopener">Print delivery challan</a></div></div>`;
   h += `<div class="card"><div class="ctrl"><h2>Deal #${id} status</h2>${chip(dl.is_simulated ? "simulated" : "verified")}</div><ol class="tracker">${STAGES.map(([k, t]) => `<li class="${reached[k] ? "done" : ""} ${k === cur ? "cur" : ""}"><span>${t}</span></li>`).join("")}</ol>
     <div class="ctrl" id="pkAct">${
@@ -1145,8 +1156,8 @@ async function vPickup(el) {
   h += `<div class="cols"><div class="card"><h2>Pickup route</h2>${routeSvg(lg)}
       <div class="leg"><span><i style="background:var(--np)"></i>B = buyer, start and end</span><span><i style="background:var(--own)"></i>S1, S2 … = pickup stops in the engine's order</span></div>
       <div class="scroll"><table><tr><th class="n">Leg</th><th>From</th><th>To</th><th class="n">km</th></tr>${lg.legs.map(l => `<tr><td class="n">${l.n}</td><td>${esc(l.from)}</td><td>${esc(l.to)}</td><td class="n">${num(l.km, 2)}</td></tr>`).join("")}<tr><td></td><td colspan="2"><b>Round trip (engine)</b></td><td class="n"><b>${num(lg.route_km, 2)}</b></td></tr></table></div>
-      <p class="note">Straight lines on the sample km grid, not roads.</p></div>
-    <div class="card"><h2>Vehicle the engine chose</h2><div class="fig"><div class="g"><b>${inr(v.transport_cost)}</b><span>Transport cost</span></div><div><b>${esc(cap1(v.name))}</b><span>${v.trips} ${v.trips === 1 ? "trip" : "trips"}</span></div><div><b>${num(lg.tour_hours * 60)} min</b><span>Tour at ${num(lg.speed_kmph)} km/h</span></div></div>
+      <p class="note">Straight lines on the sample km grid, not roads.${lg.approx_location ? ` Some stops use an ${APPROX} from the business's area.` : ""}</p></div>
+    <div class="card"><h2>Vehicle the engine chose</h2><div class="fig"><div class="g"><b>${inr(v.transport_cost)}</b><span>Transport cost${lg.approx_location ? `, ${APPROX}` : ""}</span></div><div><b>${esc(cap1(v.name))}</b><span>${v.trips} ${v.trips === 1 ? "trip" : "trips"}</span></div><div><b>${num(lg.tour_hours * 60)} min</b><span>Tour at ${num(lg.speed_kmph)} km/h</span></div></div>
       <div><div class="ctrl"><span class="lbl">Load against payload</span><div class="grow"></div><span class="note">${num(v.load_kg, 1)} kg of ${num(cap)} kg</span></div><div class="bar ${v.load_kg > cap ? "bad" : "warn"}" role="img" aria-label="${num(v.load_kg, 1)} kg of ${num(cap)} kg payload"><i style="width:${Math.min(100, v.load_kg / Math.max(cap, 1) * 100)}%"></i></div></div>
       <p class="note">Cheapest vehicle for this load and route, from the engine. Rates are ${esc(v.label)} data${v.rate_multiplier !== 1 ? `, × ${num(v.rate_multiplier, 1)} as when the deal was agreed` : ""}.</p>
       ${lg.warnings.map(w => `<p class="err">${esc(w)}</p>`).join("")}</div></div>`;
@@ -1284,7 +1295,7 @@ async function vWhatsapp(el) {
   const lan = /^(localhost|127\.|\[::1\])/.test(location.hostname);
   const regUrl = `${location.origin}/register`;
   const form = `<form id="waForm" class="form" novalidate><div class="mgrid">
-      <label class="field mfield">Business<select data-wa="business" ${bad("business")}>${R.businesses.map(b => `<option value="${esc(b.name)}" ${F.business === b.name ? "selected" : ""}>${esc(b.name)}</option>`).join("")}<option value="__other" ${F.business === "__other" ? "selected" : ""}>Other</option></select>${F.business === "__other" ? "" : err("business")}</label>
+      <label class="field mfield">Business<select data-wa="business" ${bad("business")}>${R.businesses.map(b => `<option value="${esc(b.name)}" ${F.business === b.name ? "selected" : ""}>${esc(b.name)}</option>`).join("")}${SESSION.role === "admin" ? `<option value="__other" ${F.business === "__other" ? "selected" : ""}>Other</option>` : ""}</select>${F.business === "__other" ? "" : err("business")}</label>
       ${F.business === "__other" ? `<label class="field mfield">Business name<input data-wa="other" type="text" autocomplete="organization" value="${esc(F.other)}" ${bad("business")}>${err("business")}</label>` : ""}
       <label class="field mfield">Role<select data-wa="role" ${bad("role")}>${R.roles.map(r => `<option value="${r}" ${F.role === r ? "selected" : ""}>${cap1(r)}</option>`).join("")}</select>${err("role")}</label>
       <label class="field mfield">Contact name<input data-wa="name" type="text" autocomplete="name" placeholder="e.g. Ravi" value="${esc(F.name)}" ${bad("name")}>${err("name")}</label>
@@ -1302,7 +1313,7 @@ async function vWhatsapp(el) {
     <div class="card"><div class="ctrl"><h2>Register from your phone</h2></div>
       <div class="qrbox"><img alt="QR code that opens the registration page" src="/api/qr.svg?data=${encodeURIComponent(regUrl)}"><div class="stack" style="gap:6px"><p>Scan to open a phone-friendly form and register your own WhatsApp number.</p><p class="note">Your phone must be on the same Wi-Fi as this laptop.</p><p class="note"><span class="num">${esc(regUrl)}</span></p></div></div>
       ${lan ? `<p class="why">${ic("info", "sm")}<span>This page is open at ${esc(location.hostname)}, so the QR code only works on this laptop. Start the app with <code>--host 0.0.0.0</code> and open it at the laptop's network address.</span></p>` : ""}</div></div>
-    <div class="card"><div class="section-title"><h2>Registered numbers (${list.length})</h2><span class="mut">${mine ? `Showing ${mine.join(" and ")} contacts. There is no login in this demo, so each role sees its own kind of business; Admin sees all.` : "All contacts."}</span></div>
+    <div class="card"><div class="section-title"><h2>Registered numbers (${list.length})</h2><span class="mut">${SESSION.role === "admin" ? "Every business's numbers." : `Numbers registered for ${esc(short(SESSION.business_name))}.`}</span></div>
       ${list.length ? `<div class="olist">${list.map(row).join("")}</div>` : emptyState("message-circle", "No numbers registered yet. Register one with the form, or scan the QR code with your phone.")}
       <p class="note">Numbers are shown masked except the last 4 digits. Pausing stops new alerts for that number; removing it also drops its unsent alerts.</p></div>`;
   const form$ = $("#waForm", el);

@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from conftest import sign_in
 from engine import connectors as CN
 from engine import importer as IMP
 
@@ -22,6 +23,7 @@ LOT = {"product": "Paneer", "category": "dairy", "quantity_kg": "6", "storage": 
 def temp_storage(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "DB", tmp_path / "test.db")
     monkeypatch.setattr(main, "PHOTOS", tmp_path / "photos")
+    sign_in(c, "admin")  # a fresh database each test: sign in again
 
 
 def add(lane, fields, **kw):
@@ -29,7 +31,7 @@ def add(lane, fields, **kw):
 
 
 def browse(lane):
-    return {i["id"]: i for i in c.get(f"/api/browse/{lane}").json()["items"] if i["key"] == f"import_{lane}"}
+    return {i["id"]: i for i in c.get(f"/api/browse/{lane}").json()["items"] if i["key"].startswith(f"import_{lane}")}
 
 
 def test_valid_offcut_is_found_as_surplus_and_listed_with_a_passport():
@@ -66,7 +68,7 @@ def test_same_checks_as_a_csv_row():
 
 def test_with_photo_saved_as_the_sellers_own_photo():
     r = add("durable", OFFCUT, photo=PHOTO).json()
-    assert r["listed"] and r["photo"].startswith(f"/api/photo/import_durable/{r['item_id']}")
+    assert r["listed"] and r["photo"].startswith(f"/api/photo/{r['stock_key']}/{r['item_id']}")
     assert c.get(r["photo"]).content == PNG
     item = browse("durable")[r["item_id"]]
     assert item["photo"] and item["illustrative"] is None  # the seller's photo replaces the illustrative one
