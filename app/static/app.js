@@ -724,7 +724,7 @@ const goStockCard = what => `<div class="card gostock"><div class="ctrl"><span c
 function bindAdd(el) {
   el.querySelectorAll("[data-add-back]").forEach(b => b.onclick = () => go({view: "add"}));
   el.querySelectorAll("[data-to-stock]").forEach(b => b.onclick = () => go({view: "stock"}));
-  el.querySelectorAll("[data-open-add]").forEach(b => b.onclick = () => go({view: b.dataset.openAdd}));
+  el.querySelectorAll("[data-open-add]").forEach(b => b.onclick = e => { e.preventDefault(); go({view: b.dataset.openAdd}); });
 }
 
 async function vAdd(el) {
@@ -738,31 +738,38 @@ async function vAdd(el) {
       <button class="btn pri" type="button" data-open-add="${v}">Open ${ic("arrow-right", "sm")}</button></div>`).join("")}</section>
     <div class="warow">${ic("plug")}<b>Tally / SAP / POS connectors</b>${C.connectors.filter(c => c.status === "planned").map(c => `<span>${esc(c.name)}: <span class="pill p-mut" title="Shown so you know it is coming. It does not work yet.">Planned</span></span>`).join("")}</div>
     <div class="warow">${ic("message-circle")}<b>WhatsApp</b><span>Alerts prepared automatically, sent with one click: <span class="pill p-ok">Active</span></span><span>Fully automatic sending (WhatsApp Business API): <span class="pill p-mut" title="Shown so you know it is coming. It does not work yet.">Planned</span></span><button class="btn sm ghost" type="button" data-go-wa>Set up WhatsApp alerts</button></div>`;
-    if (durable) {
-    const j = st.job, f = (label, k, extra = 'min="1" step="1"', type = "number") => `<label class="field">${label}<input data-job="${k}" type="${type}" value="${esc(j[k])}" ${extra}></label>`;
-    h += `<div class="card noprint"><h2>Next cutting job</h2><p class="mut">Enter the job you are about to cut. It goes straight to Sold before it's cut, which fills the empty space with parts neighbours have already ordered.</p>
-      <div class="ctrl"><span class="lbl">Sheet</span>${f("Length mm", "sheet_length_mm", 'min="200" step="10"')}${f("Width mm", "sheet_width_mm", 'min="200" step="10"')}
-        <label class="field">Thickness mm<select data-job="thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === j.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
-        <label class="field">Grade<select data-job="grade">${["E250", "E350"].map(g => `<option ${g === j.grade ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
-      <div class="ctrl"><span class="lbl">Part</span>${f("Part", "part_name", 'style="width:130px"', "text")}${f("Length mm", "part_length_mm", 'min="10" step="10"')}${f("Width mm", "part_width_mm", 'min="10" step="10"')}${f("Quantity", "quantity")}</div>
-      <div class="ctrl"><button class="btn pri" id="jobSend" type="button">Send to Sold before it's cut</button><span id="jobMsg" class="note" aria-live="polite"></span></div>
-      <p class="note">The neighbours' standing orders on the next screen are sample data.</p></div>`;
-  } else h += `<p class="note">Next cutting job applies to sheet cutting, so it lives in the Durable lane.</p>`;
+  if (durable && allowed("gapfill")) h += `<p class="note">About to cut a sheet? Enter the job at the top of <a href="#${st.role}/gapfill/${st.lane}" data-open-add="gapfill">Sold before it's cut</a>.</p>`;
   el.innerHTML = h;
   bindAdd(el);
-    el.querySelectorAll("[data-job]").forEach(inp => inp.onchange = () => {
+}
+/* Next cutting job, at the top of Sold before it's cut: the engine checks that the job fits before the plan changes. */
+function jobCard() {
+  const g = st.gf, j = {sheet_length_mm: g.sheet.length_mm, sheet_width_mm: g.sheet.width_mm, thickness_mm: g.sheet.thickness_mm, grade: g.sheet.grade,
+    part_name: g.job.part_name, part_length_mm: g.job.length_mm, part_width_mm: g.job.width_mm, quantity: g.job.quantity, ...(st.jobDraft || {})};
+  st.job = j;
+  const f = (label, k, extra = 'min="1" step="1"', type = "number") => `<label class="field">${label}<input data-job="${k}" type="${type}" value="${esc(j[k])}" ${extra}></label>`;
+  return `<div class="card noprint" id="jobCard"><div class="ctrl"><h2>Next cutting job</h2><span class="mut">The job you are about to cut. The empty space is filled with parts neighbours have already ordered.</span></div>
+    <div class="ctrl"><span class="lbl">Sheet</span>${f("Length mm", "sheet_length_mm", 'min="200" step="10"')}${f("Width mm", "sheet_width_mm", 'min="200" step="10"')}
+      <label class="field">Thickness mm<select data-job="thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === +j.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
+      <label class="field">Grade<select data-job="grade">${["E250", "E350"].map(gr => `<option ${gr === j.grade ? "selected" : ""}>${gr}</option>`).join("")}</select></label></div>
+    <div class="ctrl"><span class="lbl">Part</span>${f("Part", "part_name", 'style="width:130px"', "text")}${f("Length mm", "part_length_mm", 'min="10" step="10"')}${f("Width mm", "part_width_mm", 'min="10" step="10"')}${f("Quantity", "quantity")}</div>
+    <div class="ctrl"><button class="btn pri" id="jobSend" type="button">${ic("scissors", "sm")}Plan this job</button><span id="jobMsg" class="note" aria-live="polite">${st.jobMsg ? `<span class="err">${esc(st.jobMsg)}</span>` : "The neighbours' standing orders are sample data."}</span></div></div>`;
+}
+function bindJob(el) {
+  el.querySelectorAll("[data-job]").forEach(inp => inp.onchange = () => {
     const k = inp.dataset.job, v = inp.type === "text" || k === "grade" ? inp.value : +inp.value;
     if (typeof v === "number" && !(v > 0)) return;
-    st.job[k] = v;
+    st.jobDraft = {...(st.jobDraft || {}), [k]: v};
   });
   const js = $("#jobSend", el);
   if (js) js.onclick = async () => {
     js.disabled = true;
     try {
-      const r2 = await api("/api/import/cutting-job", st.job);
-      st.gf = r2.gapfill; st.gfDeclined = [];
-      go({view: "gapfill"});
-    } catch (e) { $("#jobMsg", el).innerHTML = `<span class="err">${esc(e.message)}</span>`; js.disabled = false; }
+      const r2 = await api("/api/import/cutting-job", {...st.job, ...(st.jobDraft || {})});
+      st.gf = {...r2.gapfill, prices: st.gf ? st.gf.prices : r2.gapfill.prices}; st.gfDeclined = []; st.jobDraft = null; st.jobMsg = null;
+      toast("Planned. The empty space is filled with neighbours' orders.");
+    } catch (e) { st.jobMsg = e.message; }  // the engine's reason, shown next to the button; the plan below is unchanged
+    render();
   };
 }
 
@@ -1008,17 +1015,13 @@ async function vGap(el) {
   let r, err;
   try { r = await api("/api/gapfill?record=true", {...st.gf, declined_order_ids: st.gfDeclined}); } catch (e) { err = e; }
   const s = st.gf.sheet, j = st.gf.job;
-  const ctrl = `<details class="panel noprint" id="gfPanel" ${st.gfOpen ? "open" : ""}><summary>${ic("sliders-horizontal")}Change the job <span class="mut" style="font-weight:400">· ${num(s.length_mm)} × ${num(s.width_mm)} × ${num(s.thickness_mm)} mm ${esc(s.grade)} sheet, ${num(j.quantity)} ${esc(plural(j.part_name))} ${num(j.length_mm)} × ${num(j.width_mm)} mm</span>${ic("chevron-down", "sm chev")}</summary><div class="fold-body">
-    <div class="ctrl"><span class="lbl">Sheet</span>${gField("Length (mm)", "sheet.length_mm", "number", 'min="200" step="10"')}${gField("Width (mm)", "sheet.width_mm", "number", 'min="200" step="10"')}
-      <label class="field">Thickness (mm)<select data-gf="sheet.thickness_mm">${[2, 3, 5, 6, 8, 10].map(t => `<option ${t === s.thickness_mm ? "selected" : ""}>${t}</option>`).join("")}</select></label>
-      <label class="field">Grade<select data-gf="sheet.grade">${["E250", "E350"].map(g => `<option ${g === s.grade ? "selected" : ""}>${g}</option>`).join("")}</select></label></div>
-    <div class="ctrl"><span class="lbl">Your job</span>${gField("Part", "job.part_name", "text", 'style="width:140px"')}${gField("Length (mm)", "job.length_mm", "number", 'min="10" step="10"')}${gField("Width (mm)", "job.width_mm", "number", 'min="10" step="10"')}${gField("How many", "job.quantity", "number", 'min="1" step="1"')}</div>
+  const ctrl = `<details class="panel noprint" id="gfPanel" ${st.gfOpen ? "open" : ""}><summary>${ic("sliders-horizontal")}Prices and reset <span class="mut" style="font-weight:400">· ${num(s.length_mm)} × ${num(s.width_mm)} × ${num(s.thickness_mm)} mm ${esc(s.grade)} sheet, ${num(j.quantity)} ${esc(plural(j.part_name))} ${num(j.length_mm)} × ${num(j.width_mm)} mm</span>${ic("chevron-down", "sm chev")}</summary><div class="fold-body">
     <div class="ctrl"><span class="lbl">Prices ${badge("sample")}</span>${gField("Scrap (₹/kg)", "prices.scrap_price_per_kg", "number", 'min="0" step="1"')}${gField("Pickup (₹)", "prices.pickup", "number", 'min="0" step="50"')}<div class="grow"></div><button class="btn" id="gfReset" type="button">${ic("refresh-cw")}Reset the demo</button></div></div></details>`;
-  if (err) { el.innerHTML = ctrl + errBox(err); bindG(); return; }
+  if (err) { el.innerHTML = jobCard() + ctrl + errBox(err); bindG(); return; }
   const mo = r.money, colours = {};
   r.neighbours.forEach((n, i) => colours[n.order_id] = OCOL[i % OCOL.length]);
   const parts = r.neighbours.reduce((a, n) => a + n.units, 0), buyers = new Set(r.neighbours.map(n => short(n.buyer_name))).size;
-  let h = `<div class="card"><div class="hero">
+  let h = jobCard() + `<div class="card"><div class="hero">
       <div class="stack" style="gap:12px">
         <p class="idea">Before you cut your own job, the empty part of the sheet is cut into parts that nearby buyers have already ordered, so it is sold instead of scrapped.</p>
         ${r.worth_doing ? `<div><div class="hero-num acc" id="gfHero">+${inr(mo.net_gain)}</div><p class="hero-sub">extra for this sheet's leftover: <b>${inr(mo.total_with_gap_fill)}</b> instead of <b>${inr(mo.scrap_alone)}</b> as scrap</p></div>
@@ -1045,6 +1048,7 @@ async function vGap(el) {
   bindG();
   if (r.worth_doing) countUp($("#gfHero", el), mo.net_gain, r.neighbours.length * 160 + 750, v => "+" + inr(v));
   function bindG() {
+    bindJob(el);
     el.querySelectorAll("[data-gf]").forEach(inp => inp.onchange = () => {
       const [a, b] = inp.dataset.gf.split(".");
       let v = inp.type === "text" ? inp.value : +inp.value;
@@ -1053,7 +1057,7 @@ async function vGap(el) {
       st.gf[a][b] = v; render();
     });
     const pn = $("#gfPanel", el); if (pn) pn.ontoggle = () => { st.gfOpen = pn.open; };
-    const rs = $("#gfReset", el); if (rs) rs.onclick = () => { st.gf = null; st.gfDeclined = []; toast("The demo job is back to its starting point."); render(); };
+    const rs = $("#gfReset", el); if (rs) rs.onclick = () => { st.gf = null; st.gfDeclined = []; st.jobDraft = null; st.jobMsg = null; toast("The demo job is back to its starting point."); render(); };
     const pr = $("#gfPrint", el); if (pr) pr.onclick = () => window.print();
     el.querySelectorAll("[data-decline]").forEach(b => b.onclick = () => { st.gfDeclined.push(b.dataset.decline); toast(`${esc(byId[b.dataset.decline] ? orderName(byId[b.dataset.decline]) : b.dataset.decline)} declined. The plan was worked out again.`); render(); });
     el.querySelectorAll("[data-restore]").forEach(b => b.onclick = () => { st.gfDeclined = st.gfDeclined.filter(x => x !== b.dataset.restore); render(); });
@@ -1068,9 +1072,13 @@ async function vOffers(el) {
   const ctrl = `<div class="card"><div class="ctrl">${await scenSeg()}<label class="field">Clear within (${fresh ? "hours" : "days"})<input id="dl" type="number" min="1" max="720" value="${deadline}"></label>${fresh ? "" : `<label class="field">Stockist buy-back ₹/kg<input id="stk" type="number" min="0" step="1" value="${stockist}"></label>`}</div></div>`;
   let r;
   try {
-    r = await api("/api/seller-plan", {seller_id: S.meta.plan_seller, kind: S.meta.engine, data: S.data, deadline,
+    r = await api("/api/seller-plan", {seller_id: S.meta.plan_seller, kind: S.meta.engine, data: S.data, deadline, scenario: k,
       stockist_price_per_kg: fresh ? null : stockist, rejected_route_ids: st.plan.rejected, elapsed: st.plan.elapsed});
   } catch (e) { el.innerHTML = ctrl + errBox(e) + `<button class="btn" id="rp" type="button">Reset plan</button>`; bindO(); $("#rp", el).onclick = () => { st.plan = {rejected: [], elapsed: 0, key: k}; render(); }; return; }
+  if (r.empty) {
+    el.innerHTML = ctrl + emptyState("route", esc(r.message), `<button class="btn pri" type="button" id="toAdd">${ic("plus")}Add stock</button>`);
+    bindO(); $("#toAdd", el).onclick = () => go({view: "add"}); return;
+  }
   const p = r.plan, b = p.best, T = p.time_left, tu = p.time_unit;
   let steps = (b ? b.steps : []).map(s => `<div class="step ${fresh ? "pe" : ""}" style="left:${s.start / T * 100}%;width:${(s.end - s.start) / T * 100}%"><span>${esc(s.name)}</span><small>reach ${pct(s.p_reach)} · close ${pct(s.p_close)}</small></div>`).join("");
   const last = b && b.steps.length ? b.steps[b.steps.length - 1].end : 0;

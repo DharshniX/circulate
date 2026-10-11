@@ -192,6 +192,7 @@ class SellerPlanRequest(BaseModel):
     stockist_price_per_kg: float | None = None
     rejected_route_ids: list[str] = []
     elapsed: int = Field(0, ge=0)
+    scenario: str | None = None  # a seller's plan: the cluster, rebuilt on the server around its own stock
 
 
 class NewDeal(BaseModel):
@@ -324,8 +325,30 @@ def api_fulfil(req: FulfilRequest, me=BUYER):
         _bad(e)
 
 
+def _my_plan_request(req: SellerPlanRequest, me: dict) -> SellerPlanRequest | None:
+    """A seller's own recovery plan: the whole cluster (every seller, every open order) from the server, with this seller's
+    own stock as the seller. None if it has no stock in this material."""
+    key = req.scenario
+    if key not in SC.SCENARIOS:
+        raise HTTPException(422, "Choose a material.")
+    d = _dataset_with_own(key)
+    owned = _owned(key)
+    mine = sorted(_my_sample_sellers(me, key)) + sorted({r.seller_id for r in owned["resources"] if owned["origin"][r.id][0] == me["business_id"]})
+    if not mine:
+        return None
+    data = Dataset(sellers=d["sellers"], resources=d["resources"], demands=d["demands"], transport=req.data.transport, settings=d["settings"])
+    return req.model_copy(update={"seller_id": mine[0], "kind": SC.SCENARIOS[key]["engine"], "data": data})
+
+
 @app.post("/api/seller-plan")
-def api_seller_plan(req: SellerPlanRequest, me=ADMIN):
+def api_seller_plan(req: SellerPlanRequest, me=SELLER):
+    """Offers and recovery plan. The admin plans for any seller with the data sent; a seller plans for its own stock."""
+    if not me["admin"]:
+        mine = _my_plan_request(req, me)
+        if mine is None:
+            return {"empty": True, "seller_name": me["name"],
+                    "message": "You have no stock in this material yet. Add stock, and the plan shows which buyers to try first."}
+        req = mine
     seller = next((s for s in req.data.sellers if s.id == req.seller_id), None)
     if seller is None:
         _bad(ValueError(f"unknown seller {req.seller_id}"))
@@ -2419,7 +2442,8 @@ ADD_STOCK_GROUP = ("Add stock", [("add", "Add stock", "plus", None), ("add-csv",
                                  ("add-sync", "Auto-sync", "folder-sync", None), ("add-manual", "Manual entry", "keyboard", None)])
 # Each role's left rail: (group, [(view, label, icon, lane or None)]). The first item that fits the lane is the role's home.
 ROLE_MENUS = {
-    "seller": [("My workshop", [("gapfill", "Sold before it's cut", "scissors", "durable"), ("stock", "My stock and passports", "qr-code", None)]),
+    "seller": [("My workshop", [("gapfill", "Sold before it's cut", "scissors", "durable"), ("stock", "My stock and passports", "qr-code", None),
+                                ("offers", "Offers and recovery plan", "route", None)]),
                ADD_STOCK_GROUP,
                ("Orders", [("deals", "Deals", "receipt", None), ("pickup", "Pickups", "truck", None)]),
                ("Alerts", [("whatsapp", "WhatsApp alerts", "message-circle", None)])],

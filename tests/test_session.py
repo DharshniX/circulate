@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from conftest import sign_in
 
-SELLER = {"gapfill", "stock", "add", "add-csv", "add-sync", "add-manual", "deals", "pickup", "whatsapp"}
+SELLER = {"gapfill", "stock", "offers", "add", "add-csv", "add-sync", "add-manual", "deals", "pickup", "whatsapp"}
 BUYER = {"browse", "post", "reqs", "match", "pickup", "whatsapp"}
 
 
