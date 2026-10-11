@@ -537,7 +537,7 @@ body.entry{min-height:100vh;display:flex;background:var(--bg)}
 .login .err[hidden]{display:none}
 .login-alt{color:var(--mut);text-align:center}.login-alt a{font-weight:600}
 .demo-panel{border-top:1px solid var(--line);padding-top:var(--s2);display:flex;flex-direction:column;gap:var(--s1)}
-.demo-panel>summary{font-weight:600;cursor:pointer;display:flex;align-items:center;gap:var(--s1)}
+.demo-panel .demo-h{font:600 15px/1.3 var(--body);margin:0;display:flex;align-items:center;gap:var(--s1)}
 .demo-panel .accts{margin-top:var(--s1)}
 .login.signup{max-width:720px}
 .signup .opts label{white-space:normal;text-align:center;padding:8px 12px}

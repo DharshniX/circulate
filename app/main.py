@@ -236,10 +236,14 @@ def app_page(request: Request):
     if _session(request) is None:
         return RedirectResponse("/", status_code=307)
     html = (ROOT / "static" / "app.html").read_text(encoding="utf-8")
-    stamp = int(max((ROOT / "static" / f).stat().st_mtime for f in ("app.js", "app.css")))
+    stamp = _asset_stamp()
     # a version on the script and style links, so a browser never mixes an old cached app.js with a new page
     html = html.replace("/static/app.js", f"/static/app.js?v={stamp}").replace("/static/app.css", f"/static/app.css?v={stamp}")
     return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
+
+
+def _asset_stamp() -> int:
+    return int(max((ROOT / "static" / f).stat().st_mtime for f in ("app.js", "app.css")))
 
 
 @app.get("/legacy")
@@ -2787,7 +2791,7 @@ def _entry_page(title: str, body: str) -> str:
     return ('<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
             f'<title>{_html.escape(title)}</title><link rel="icon" href="/static/brand/favicon.svg" type="image/svg+xml">'
             '<link rel="preload" href="/static/fonts/ibm-plex-sans-latin.woff2" as="font" type="font/woff2" crossorigin>'
-            '<link rel="stylesheet" href="/static/app.css"></head>'
+            f'<link rel="stylesheet" href="/static/app.css?v={_asset_stamp()}"></head>'
             f'<body class="entry"><main class="entry-main">{body}</main></body></html>')
 
 
@@ -2867,17 +2871,18 @@ def login_page(role: str, request: Request):
     if _session(request) is not None:
         return RedirectResponse("/app", status_code=307)
     if auth_mode() == "demo":
-        return _entry_page(f"{ROLE_NAMES[role]} login · CIRCULATE", _demo_login_page(role))
+        return HTMLResponse(_demo_login_page(role))  # already a whole page
     e = _html.escape
     demo_pw = os.environ.get("DEMO_PASSWORD") or "Circulate@2026"
     demos = [(email, _demo_accounts()[bid]) for email, bid, r, _ in DEMO_USERS if r == role]
     panel = ""
     if demos:
-        panel = (f'<details class="demo-panel" open><summary>Demo accounts <span class="pill p-warn">Demo only</span></summary>'
+        # a plain section, always open: nothing to collapse by accident, and it renders the same in every browser
+        panel = (f'<section class="demo-panel" aria-labelledby="demo-h"><h2 class="demo-h" id="demo-h">Demo accounts <span class="pill p-warn">Demo only</span></h2>'
                  f'<p class="note">Tap a business to fill in its email and password, then press Sign in.</p><div class="accts">'
-                 + "".join(f'<button class="acct" type="button" data-email="{e(email)}"><span class="av">{e(a["initial"])}</span>'
+                 + "".join(f'<button class="acct" type="button" data-email="{e(email)}" data-business="{e(a["business_id"])}"><span class="av">{e(a["initial"])}</span>'
                            f'<span class="ac-t"><b>{e(a["short_name"])}</b><span>{e(email)}</span></span><span class="pill">{e(ROLE_NAMES[role])}</span>'
-                           f'{_ic("chevron-right")}</button>' for email, a in demos) + '</div></details>')
+                           f'{_ic("chevron-right")}</button>' for email, a in demos) + '</div></section>')
     create = (f'<p class="login-alt">New to CIRCULATE? <a href="/signup/{role}">Create a {role} account</a></p>' if role != "admin" else "")
     body = f"""<div class="login r-{role}">
   <a class="entry-back" href="/">{_ic("chevron-right")}Back</a>
