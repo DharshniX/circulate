@@ -10,6 +10,7 @@ agreed -> dispatched -> delivered (with evidence and buyer confirmation).
 """
 from __future__ import annotations
 
+import functools
 import io
 import json
 import secrets
@@ -128,6 +129,9 @@ def db():
         con.execute("ALTER TABLE requirements ADD COLUMN owner TEXT")  # older rows have no owner: admin only
     con.execute("""CREATE TABLE IF NOT EXISTS reservations (
         req_id INTEGER PRIMARY KEY, seller TEXT, parts INTEGER, at TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS collection_requests (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, owner TEXT, business_name TEXT, area TEXT, lane TEXT, items TEXT,
+        weight_kg REAL, pickup_date TEXT, slot TEXT, note TEXT, status TEXT, history TEXT, label TEXT)""")
     con.execute("""CREATE TABLE IF NOT EXISTS whatsapp_contacts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, business TEXT, role TEXT, name TEXT, phone TEXT, alerts TEXT,
         consent_at TEXT, active INTEGER, created_at TEXT)""")
@@ -444,10 +448,30 @@ except ImportError:  # the app still runs; only QR codes are missing
 def _describe(p) -> str:
     if p.kind == "flat":
         extra = f", {len(p.defects)} defect(s)" if p.defects else ""
-        return f"{p.length_mm:g} x {p.width_mm:g} x {p.thickness_mm:g} mm {M_name(p.material)} {p.grade}, {p.condition}{extra}"
+        return f"{p.length_mm:g} x {p.width_mm:g} x {p.thickness_mm:g} mm {M_name(p.material)} {p.grade}, {_words(p.condition)}{extra}"
     if p.kind == "linear":
-        return f"{p.profile}, {p.length_mm:g} mm, {M_name(p.material)} {p.grade}, {p.condition}"
+        return f"{p.profile}, {p.length_mm:g} mm, {M_name(p.material)} {p.grade}, {_words(p.condition)}"
     return f"{p.product}, {p.quantity_kg:g} kg, {p.storage}, {p.hours_left:g} h left"
+
+
+def _words(v: str) -> str:
+    return v.replace("_", " ")
+
+
+def _extras(p, seller_type: str | None) -> dict:
+    """What a stock row, passport and Browse card show besides the basics: condition, seller type, and the rebar weight note."""
+    from engine import materials as M
+    out = {"seller_type": seller_type, "seller_type_name": SELLER_TYPES.get(seller_type or "")}
+    if p.kind != "perishable":
+        out.update(material=p.material, condition=p.condition, condition_name=_words(p.condition).capitalize())
+    if p.kind == "linear" and p.material in M.BAR_MATERIALS:
+        out.update(weight_note=M.REBAR_WEIGHT_NOTE, weight_label="assumption")
+    return out
+
+
+def _seller_types() -> dict[str, str]:
+    """business name -> seller type, for seller accounts (sample sellers without an account have none)."""
+    return {u["business_name"]: u["seller_type"] for u in _accounts_by_bid().values() if u["role"] == "seller" and u["seller_type"]}
 
 
 def M_name(key: str) -> str:
@@ -476,17 +500,17 @@ def _import_rows(lane: str, owner: str | None = None) -> list:
 
 
 def _imported_stock(lane: str, owner: str | None = None) -> list[dict]:
-    from engine.models import PerishableLot
-    names = _owner_names()
+    names, accounts = _owner_names(), _accounts_by_bid()
     out = []
     for r in _import_rows(lane, owner):
-        p = (IMP.ImportedSheet if lane == "durable" else PerishableLot).model_validate_json(r["item"])
+        p = IMP.parse_item(lane, r["item"])
         key = _import_key(lane, r["owner"])
+        u = accounts.get(r["owner"])
         item = {"id": p.id, "seller_id": p.seller_id, "seller_name": names.get(r["owner"]) or p.seller_id, "kind": p.kind,
                 "description": _describe(p), "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2),
                 "scrap_value": None, "scrap_price_per_kg": None, "label": r["label"], "status": "available",
                 "passport": f"/passport/{key}/{p.id}", "rules": json.loads(r["rules"]), "source": r["source"] or IMP.SOURCE,
-                "listed_at": r["listed_at"], "key": key, "owner": r["owner"]}
+                "listed_at": r["listed_at"], "key": key, "owner": r["owner"], **_extras(p, u["seller_type"] if u else None)}
         if p.kind == "perishable":
             item["hours_left"] = p.hours_left
             item["urgent"] = True
@@ -506,6 +530,7 @@ def _stock(key: str) -> list[dict]:
     d = SC.dataset(key)
     names = {s.id: s.name for s in d["sellers"]}
     sellers = {s.id: s for s in d["sellers"]}
+    types = _seller_types()
     out = []
     for p in d["resources"]:
         eng = REGISTRY[p.kind]
@@ -514,7 +539,7 @@ def _stock(key: str) -> list[dict]:
         item = {"id": p.id, "seller_id": p.seller_id, "seller_name": names[p.seller_id], "kind": p.kind,
                 "description": _describe(p), "kg": round(kg, 2), "scrap_value": round(kg * price, 2),
                 "scrap_price_per_kg": price, "label": p.label, "status": "available",
-                "passport": f"/passport/{key}/{p.id}"}
+                "passport": f"/passport/{key}/{p.id}", **_extras(p, types.get(names[p.seller_id]))}
         if p.kind == "perishable":
             item["hours_left"] = p.hours_left
         out.append(item)
@@ -582,8 +607,9 @@ def passport(key: str, rid: str, request: Request):
     if item is None:
         raise HTTPException(404, "no such item")
     e = _html.escape
+    weight = f"{item['kg']} kg" + (f" (Assumption: {item['weight_note']})" if item.get("weight_note") else "")
     rows = [("Passport ID", f"{key}:{item['id']}"), ("Seller", item["seller_name"]), ("What it is", item["description"]),
-            ("Weight", f"{item['kg']} kg"),
+            ("Weight", weight),
             ("Scrap value", "No scrap price entered yet. Add a dated quote before showing one." if item["scrap_value"] is None
              else f"Rs {item['scrap_value']:,.0f} at Rs {item['scrap_price_per_kg']}/kg"),
             ("Status", item["status"]), ("Data", item["label"].title())]
@@ -591,7 +617,12 @@ def passport(key: str, rid: str, request: Request):
         rows += [("Source", item["source"]), ("Found as surplus by", "; ".join(item["rules"]))]
     if "hours_left" in item:
         rows.insert(3, ("Shelf life left", f"{item['hours_left']:g} hours"))
+    if item.get("condition_name"):
+        rows.insert(3, ("Condition", item["condition_name"]))
     dl = "".join(f"<dt>{e(a)}</dt><dd>{e(str(b))}</dd>" for a, b in rows)
+    if item.get("seller_type_name"):  # a small chip after the seller's name
+        dl = dl.replace(f"<dd>{e(item['seller_name'])}</dd>",
+                        f'<dd>{e(item["seller_name"])} <span class="tag">{e(item["seller_type_name"])}</span></dd>', 1)
     qr_url = f"/api/qr.svg?data={_origin(request)}/passport/{key}/{rid}"
     share = (f'<p class="noprint"><a href="/share/{e(key)}/{e(rid)}" target="_blank" rel="noopener" style="display:inline-block;padding:8px 14px;'
              f'border:1px solid #c4ccd3;border-radius:8px;font-weight:600;color:#17222b;text-decoration:none">Share on WhatsApp</a>'
@@ -895,6 +926,7 @@ def _browse_scenario(key: str, me: dict) -> tuple[list[dict], dict]:
     cfg, sellers = d["settings"], {s.id: s for s in d["sellers"]}
     demands = _my_demands(me, key)
     here = _buyer_origin(me, key, demands)
+    types = _seller_types()
     out = []
     for p in d["resources"]:
         eng, seller = REGISTRY[p.kind], sellers[p.seller_id]
@@ -904,7 +936,8 @@ def _browse_scenario(key: str, me: dict) -> tuple[list[dict], dict]:
                "quoted_on": offer.quoted_on.isoformat() if offer.quoted_on else None}
         item = {**p.model_dump(mode="json"), "key": key, "seller_name": seller.name, "kg": round(kg, 2),
                 "distance_km": round(_dist((seller.x_km, seller.y_km), (here["x_km"], here["y_km"])), 1),
-                "approx_location": here["approx"], "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id)}
+                "approx_location": here["approx"], "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id),
+                **_extras(p, types.get(seller.name))}
         if p.kind == "perishable":
             item["disposal"] = alt
         else:
@@ -940,18 +973,19 @@ NO_OWNER = "Saved before accounts existed, so it has no seller and is not matche
 def _browse_imported(lane: str, me: dict) -> list[dict]:
     """Items sellers listed themselves, each matched as its own seller. Rows saved before accounts: admin only."""
     from engine.models import PerishableLot
-    names = _owner_names()
+    names, accounts = _owner_names(), _accounts_by_bid()
     out = []
     for r in _import_rows(lane):
         owner = r["owner"]
         if not owner and not me["admin"]:
             continue
-        p = (IMP.ImportedSheet if lane == "durable" else PerishableLot).model_validate_json(r["item"])
+        p = IMP.parse_item(lane, r["item"])
         key = _import_key(lane, owner)
         item = {**p.model_dump(mode="json"), "key": key, "label": r["label"], "seller_name": names.get(owner) or p.seller_id,
                 "kg": round(REGISTRY[p.kind].resource_kg(p, Settings()), 2), "distance_km": None, "approx_location": False,
                 "passport": f"/passport/{key}/{p.id}", "photo": _photo_url(key, p.id), "rules": json.loads(r["rules"]),
-                "source": r["source"] or IMP.SOURCE, "match_seller": None, "order": None, "order_reason": NO_OWNER}
+                "source": r["source"] or IMP.SOURCE, "match_seller": None, "order": None, "order_reason": NO_OWNER,
+                **_extras(p, accounts[owner]["seller_type"] if owner in accounts else None)}
         if owner:
             item.update(_own_order(p, owner, me))
         if p.kind == "perishable":
@@ -1372,15 +1406,21 @@ def manual_options(me=SELLER):
     from typing import get_args
     from engine import materials as MAT
     from engine.models import Condition, FoodCategory, Storage
-    return {"materials": [{"key": m.key, "name": m.name} for m in MAT.MATERIALS.values()], "conditions": list(get_args(Condition)),
-            "categories": list(get_args(FoodCategory)), "storage": list(get_args(Storage)), "source": IMP.MANUAL_SOURCE}
+    mats = [{"key": m.key, "name": m.name, "bar": m.key in MAT.BAR_MATERIALS} for m in MAT.MATERIALS.values()]
+    if me["account"].get("seller_type") == "construction_site":  # site stock first
+        mats.sort(key=lambda m: m["key"] not in ("tmt_rebar", "shuttering_plywood"))
+    return {"materials": mats, "conditions": [c for c in get_args(Condition) if c not in MAT.USE_CONDITIONS[1:]],
+            "categories": list(get_args(FoodCategory)), "storage": list(get_args(Storage)), "source": IMP.MANUAL_SOURCE,
+            "rebar": {"grades": list(MAT.REBAR_GRADES), "diameters_mm": list(MAT.REBAR_DIAMETERS_MM), "weight_note": MAT.REBAR_WEIGHT_NOTE,
+                      "kg_per_m": {str(d): round(MAT.rebar_kg_per_m(d), 3) for d in MAT.REBAR_DIAMETERS_MM}},
+            "shuttering": {"thicknesses_mm": list(MAT.SHUTTERING_THICKNESSES_MM), "conditions": list(MAT.USE_CONDITIONS)}}
 
 
 @app.post("/api/manual/{lane}")
 def manual_entry(lane: Literal["durable", "fresh"], m: ManualItem, now: datetime | None = None, me=SELLER):
     """Check one hand-typed item with the importer, apply the surplus rules, and list it if it is surplus
     (or if the seller asks to list it anyway). An invalid item is never listed. `now` is only for tests."""
-    fields = {k: v for k, v in m.fields.items() if k in IMP.COLUMNS[lane]}
+    fields = {k: v for k, v in m.fields.items() if k in IMP.COLUMNS[lane] + IMP.OPTIONAL[lane]}
     fields["item_id"] = str(fields.get("item_id") or "").strip() or _manual_id()
     fields["seller_id"] = str(fields.get("seller_id") or "").strip() or (me["name"] if not me["admin"] else "My workshop" if lane == "durable" else "My kitchen")
     errors = {}
@@ -1415,7 +1455,7 @@ def manual_entry(lane: Literal["durable", "fresh"], m: ManualItem, now: datetime
 # ---------------- Each seller's own stock in matching, and "What can this become?" ----------------
 from engine import become as BEC
 from engine.gapfill import GapFillPrices, StandingOrder
-from engine.models import FlatPiece, PerishableLot
+from engine.models import FlatPiece, LinearStock, PerishableLot
 
 OWN_ID, OWN_NAME = "YOU", "Your workshop"  # the admin's own test items (and rows saved before accounts)
 # Approximate positions of Chennai areas in km east and north of the city centre (Chennai Central), from rounded map
@@ -1436,6 +1476,29 @@ def _area_xy(area: str | None) -> tuple[float, float]:
     return CITY_CENTRE
 
 
+@functools.lru_cache(maxsize=1)
+def _sample_salvage() -> dict:
+    """One sample scrap or disposal price per material across every cluster. Rebar takes the mild steel scrap price and
+    shuttering plywood the plywood price (same scrap stream); both stay labelled Sample."""
+    out = {}
+    for key in SC.SCENARIOS:
+        for x in SC.dataset(key)["sellers"]:
+            for o in x.salvage:
+                out.setdefault(o.applies_to, o)
+    for new, like in (("tmt_rebar", "mild_steel"), ("shuttering_plywood", "plywood")):
+        if like in out:
+            out.setdefault(new, out[like].model_copy(update={"applies_to": new}))
+    return out
+
+
+def _complete_salvage(seller: Seller, first: list) -> Seller:
+    """The seller's own prices first (then the cluster's), then a sample price for any material it has none for."""
+    have = {o.applies_to: o for o in first}
+    for k, o in _sample_salvage().items():
+        have.setdefault(k, o)
+    return seller.model_copy(update={"salvage": list(have.values())})
+
+
 def _own_seller(d: dict) -> Seller:
     """The admin's own items: a seller placed at the centre of the cluster's sellers, with the cluster's sample scrap prices."""
     xs, ys = [x.x_km for x in d["sellers"]], [x.y_km for x in d["sellers"]]
@@ -1443,8 +1506,9 @@ def _own_seller(d: dict) -> Seller:
     for x in d["sellers"]:
         for o in x.salvage:
             salvage.setdefault(o.applies_to, o)
-    return Seller(id=OWN_ID, name=OWN_NAME, x_km=round(sum(xs) / len(xs), 2), y_km=round(sum(ys) / len(ys), 2),
-                  salvage=list(salvage.values()), fssai_licensed=False, label="sample")
+    s = Seller(id=OWN_ID, name=OWN_NAME, x_km=round(sum(xs) / len(xs), 2), y_km=round(sum(ys) / len(ys), 2),
+               salvage=list(salvage.values()), fssai_licensed=False, label="sample")
+    return _complete_salvage(s, s.salvage)
 
 
 def _accounts_by_bid() -> dict:
@@ -1472,7 +1536,7 @@ def _owner_seller(owner: str, key: str, d: dict, accounts: dict) -> tuple[Seller
         return _own_seller(d), False
     same = next((x for x in d["sellers"] if f"{key}:{x.id}" == owner or x.name == u["business_name"]), None)
     if same is not None:
-        return same, False
+        return _complete_salvage(same, same.salvage), False
     x, y = _area_xy(u["area"])
     return _own_seller(d).model_copy(update={"id": owner, "name": u["business_name"], "x_km": x, "y_km": y}), True
 
@@ -1485,7 +1549,8 @@ def _own_items(lane: str, owner: str | None = None) -> list[tuple[str, object]]:
             continue  # saved before accounts: no seller to match it as
         data = {**json.loads(r["item"]), "label": r["label"] if r["label"] in ("measured", "sample") else "sample"}
         data.pop("days_unused", None)
-        out.append((r["owner"], FlatPiece(**data) if lane == "durable" else PerishableLot(**data)))
+        model = PerishableLot if lane == "fresh" else LinearStock if data.get("kind") == "linear" else FlatPiece
+        out.append((r["owner"], model(**data)))
     return out
 
 
@@ -1758,6 +1823,8 @@ def _sample_price(kind: str, material: str | None, buyer_type: str | None = None
     prices = [x.new_price_per_kg for x in SC.dataset(key)["demands"] if x.kind == kind and x.material == material]
     if not prices and kind == "flat":
         prices = [o["new_price_per_kg"] for o in SC.gapfill_demo()["orders"] if o["material"] == material]
+    if not prices and kind == "linear" and material == "tmt_rebar":  # no rebar order in the sample: the cluster's steel bar price
+        prices = [x.new_price_per_kg for x in SC.dataset(key)["demands"] if x.kind == "linear" and x.material == "mild_steel"]
     return min(prices) if prices else None
 
 
@@ -1885,9 +1952,12 @@ def requirement_options(me=BUYER):
     bars = SC.dataset("bars")
     profiles = sorted({(x.profile, x.mass_per_m_kg, x.material) for x in [*bars["resources"], *bars["demands"]]})
     return {"materials": [{"key": m.key, "name": m.name, "grades": sorted(grades.get(m.key, [])),
-                           "sample_price": _sample_price("flat", m.key)} for m in MAT.MATERIALS.values()],
+                           "sample_price": _sample_price("flat", m.key)} for m in MAT.MATERIALS.values() if m.key not in MAT.BAR_MATERIALS],
             "conditions": list(get_args(Condition)), "default_conditions": ["new", "good", "surface_rust"],
-            "profiles": [{"profile": pr, "mass_per_m_kg": kg, "material": mat, "sample_price": _sample_price("linear", mat)} for pr, kg, mat in profiles],
+            "profiles": [{"profile": pr, "mass_per_m_kg": kg, "material": mat, "sample_price": _sample_price("linear", mat)} for pr, kg, mat in profiles]
+                        + [{"profile": MAT.rebar_profile(dia), "mass_per_m_kg": round(MAT.rebar_kg_per_m(dia), 3), "material": "tmt_rebar",
+                            "sample_price": _sample_price("linear", "tmt_rebar"), "grades": list(MAT.REBAR_GRADES),
+                            "weight_note": MAT.REBAR_WEIGHT_NOTE, "weight_label": "assumption"} for dia in MAT.REBAR_DIAMETERS_MM],
             "bar_grades": sorted({g for x in bars["demands"] for g in x.accepted_grades} | {x.grade.upper() for x in bars["resources"]}),
             "categories": list(get_args(FoodCategory)), "storage": list(get_args(Storage)),
             "buyer_types": [{"key": "business", "name": "Food business"}, {"key": "hostel", "name": "Hostel mess"},
@@ -1955,9 +2025,9 @@ def close_requirement(req_id: int, me=BUYER):
 # Nothing is sent by CIRCULATE. A notification is a ready message and a wa.me link; a person opens it and
 # presses send in WhatsApp. Statuses only record what that person did: opened, marked as sent, skipped.
 ALERT_TYPES = {"new_match": "New matching order", "order_accepted": "Order accepted", "pickup_booked": "Pickup booked",
-               "delivered": "Delivered", "fresh": "Fresh food near its use-by"}
+               "delivered": "Delivered", "fresh": "Fresh food near its use-by", "collection": "Collection request update"}
 CONTACT_ROLES = ("seller", "buyer", "food bank")
-DEFAULT_ALERTS = {"seller": ["new_match", "pickup_booked"], "buyer": ["order_accepted", "pickup_booked", "delivered", "fresh"],
+DEFAULT_ALERTS = {"seller": ["new_match", "pickup_booked", "collection"], "buyer": ["order_accepted", "pickup_booked", "delivered", "fresh"],
                   "food bank": ["order_accepted", "pickup_booked", "delivered", "fresh"]}
 STATUS_TEXT = {"ready": "Ready to send", "opened": "Opened in WhatsApp", "sent": "Marked as sent by you", "skipped": "Skipped"}
 CONSENT_TEXT = "I agree to receive CIRCULATE alerts on this WhatsApp number. I can turn them off anytime."
@@ -2340,7 +2410,6 @@ f.onsubmit=async ev=>{{ev.preventDefault();document.querySelectorAll(".err").for
 # ---------------- Demo logins: separate entry for seller, buyer and admin ----------------
 # A demo login only picks whose screens and data you see. There are no passwords, nothing secret is stored,
 # and the APIs stay open (no API authentication) by design: this is a prototype.
-import functools
 
 SESSION_COOKIE = "circulate_session"
 ROLE_NAMES = {"seller": "Seller", "buyer": "Buyer", "admin": "Admin"}
@@ -2363,7 +2432,8 @@ ROLE_MENUS = {
               ADD_STOCK_GROUP,
               ("Buyer screens", [("browse", "Browse surplus", "search", None), ("post", "Post a requirement", "file-plus-2", None),
                                  ("reqs", "My requirements", "clipboard-list", None), ("match", "Order and match", "layers", None)]),
-              ("Deals", [("monitor", "Deal monitor", "gauge", None), ("deals", "Deals", "receipt", None), ("pickup", "Pickups and deliveries", "truck", None)]),
+              ("Deals", [("monitor", "Deal monitor", "gauge", None), ("deals", "Deals", "receipt", None), ("pickup", "Pickups and deliveries", "truck", None),
+                         ("collections", "Collection requests", "package", None)]),
               ("Platform", [("quality", "Data quality", "shield-check", None), ("sim", "Simulation lab", "flask-conical", None),
                             ("prices", "Price references", "banknote", None), ("rules", "Rules", "list-checks", None), ("users", "All users", "users", None)]),
               ("Alerts", [("ready", "Ready to send", "send", None), ("whatsapp", "WhatsApp alerts", "message-circle", None)])],
@@ -3039,6 +3109,117 @@ def admin_temp_password(uid: int, request: Request, me=REAL_ADMIN):
     with closing(db()) as con, con:
         con.execute("UPDATE users SET password_hash=?, salt=?, token_version=token_version+1 WHERE id=?", (h, salt, uid))
     return {"temporary_password": temp, "note": "Give this to the account holder and ask them to change it under Account."}
+
+
+# ---------------- Collection requests: a seller asks for a pickup; CIRCULATE arranges a hired vehicle ----------------
+# Asset-light: CIRCULATE never buys or stores goods. A request only records what the seller asked for and how far the
+# CIRCULATE team has got (matched to a buyer, vehicle booked, closed).
+COLLECTION_STATUS = {"requested": "Requested", "matched": "Matched to buyer", "vehicle_booked": "Vehicle booked", "closed": "Closed"}
+HIRED = "Pickup by a hired vehicle. CIRCULATE never buys or stores goods."
+
+
+class ItemRef(BaseModel):
+    key: str = Field(min_length=1, max_length=200)
+    id: str = Field(min_length=1, max_length=200)
+
+
+class CollectionIn(BaseModel):
+    items: list[ItemRef] = Field(default_factory=list, max_length=500)
+    pickup_date: date | None = None
+    slot: str = ""
+    note: str = Field("", max_length=500)
+
+
+class CollectionStatusIn(BaseModel):
+    status: Literal["matched", "vehicle_booked", "closed"]
+
+
+def _collection_out(r) -> dict:
+    items = json.loads(r["items"])
+    return {"id": r["id"], "created_at": r["created_at"], "owner": r["owner"], "business_name": r["business_name"], "area": r["area"],
+            "lane": r["lane"], "items": items, "item_count": len(items), "weight_kg": r["weight_kg"], "pickup_date": r["pickup_date"],
+            "slot": r["slot"], "note": r["note"], "status": r["status"], "status_text": COLLECTION_STATUS[r["status"]],
+            "history": json.loads(r["history"]), "label": r["label"], "pickup": HIRED}
+
+
+def _my_item(me: dict, ref: ItemRef) -> dict | None:
+    """One of this seller's own items (its listed stock, or its own sample pieces); None if it is not theirs or not there."""
+    try:
+        item = next((i for i in _stock(ref.key) if i["id"] == ref.id), None)
+    except HTTPException:
+        return None
+    if item is None or me["admin"]:
+        return item
+    imp = _parse_import(ref.key)
+    mine = imp[1] == me["business_id"] if imp else item["seller_id"] in _my_sample_sellers(me, ref.key)
+    return item if mine else None
+
+
+def _notify_collection(row, origin: str) -> None:
+    c = _collection_out(row)
+    when = datetime.fromisoformat(c["pickup_date"]).strftime("%d %b %Y").lstrip("0")
+    text = MSG.collection_update({"id": c["id"], "business": c["business_name"], "status_text": c["status_text"].lower(),
+                                  "items": c["item_count"], "kg": c["weight_kg"], "date": when, "slot": c["slot"],
+                                  "link": f"{origin}/app#seller/stock/{c['lane']}", "label": c["label"]})
+    notify("collection", text, ["seller"], [c["business_name"]], item_id=f"C{c['id']}:{c['status']}")
+
+
+@app.get("/api/collections")
+def collections(me=SELLER):
+    """This seller's collection requests, newest first. The admin sees every seller's."""
+    with closing(db()) as con:
+        rows = con.execute("SELECT * FROM collection_requests ORDER BY id DESC").fetchall()
+    return {"requests": [_collection_out(r) for r in rows if me["admin"] or r["owner"] == me["business_id"]],
+            "slots": SLOTS, "statuses": COLLECTION_STATUS, "pickup": HIRED}
+
+
+@app.post("/api/collections")
+def request_collection(c: CollectionIn, request: Request, me=SELLER):
+    """Ask for a pickup of some of your own items, on a preferred date and slot. Status starts as requested."""
+    errors, items = {}, []
+    for ref in c.items:
+        it = _my_item(me, ref)
+        if it is None:
+            errors["items"] = f"{ref.id} is not one of your items. Pick from My stock."
+            break
+        if all(not (x["key"] == ref.key and x["id"] == ref.id) for x in items):
+            items.append({"key": ref.key, "id": it["id"], "description": it["description"], "kg": it["kg"], "label": it["label"]})
+    if not c.items:
+        errors["items"] = "Pick at least one item to collect."
+    if c.pickup_date is None:
+        errors["pickup_date"] = "Pick a preferred date."
+    elif c.pickup_date < datetime.now().date():
+        errors["pickup_date"] = "Pick today or a later date."
+    if c.slot not in SLOTS:
+        errors["slot"] = "Choose a time slot."
+    if errors:
+        raise HTTPException(422, {"message": "Some fields need fixing. Nothing was requested.", "errors": errors})
+    a, now = me["account"], _now()
+    label = "measured" if all(x["label"] == "measured" for x in items) else "sample"
+    with closing(db()) as con, con:
+        cur = con.execute("INSERT INTO collection_requests (created_at, owner, business_name, area, lane, items, weight_kg, pickup_date, slot,"
+                          " note, status, history, label) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (now, me["business_id"], me["name"], a.get("area", ""), a.get("lane") or "durable", json.dumps(items),
+                           round(sum(x["kg"] for x in items), 2), c.pickup_date.isoformat(), c.slot, c.note.strip(), "requested",
+                           json.dumps([{"at": now, "status": "requested"}]), label))
+        row = con.execute("SELECT * FROM collection_requests WHERE id=?", (cur.lastrowid,)).fetchone()
+    _safely(_notify_collection, row, _origin(request))
+    return _collection_out(row)
+
+
+@app.post("/api/collections/{cid}/status")
+def collection_status(cid: int, s: CollectionStatusIn, request: Request, me=ADMIN):
+    """The CIRCULATE team records progress: matched to a buyer, vehicle booked (a hired vehicle), or closed."""
+    now = _now()
+    with closing(db()) as con, con:
+        row = con.execute("SELECT * FROM collection_requests WHERE id=?", (cid,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "no such collection request")
+        con.execute("UPDATE collection_requests SET status=?, history=? WHERE id=?",
+                    (s.status, json.dumps(json.loads(row["history"]) + [{"at": now, "status": s.status}]), cid))
+        row = con.execute("SELECT * FROM collection_requests WHERE id=?", (cid,)).fetchone()
+    _safely(_notify_collection, row, _origin(request))
+    return _collection_out(row)
 
 
 # ---------------- Add stock: direct links to the four pages ----------------

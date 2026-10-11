@@ -103,7 +103,7 @@ def test_fresh_urgent_rule_and_editable_limit():
 
 
 def test_example_files_download_and_parse():
-    for lane, surplus, kept, bad in (("durable", 5, 3, 3), ("fresh", 4, 3, 3)):
+    for lane, surplus, kept, bad in (("durable", 8, 3, 3), ("fresh", 4, 3, 3)):
         d = c.get(f"/api/import/example/{lane}")
         assert d.status_code == 200 and "attachment" in d.headers["content-disposition"]
         r = preview(lane, d.text).json()
@@ -115,15 +115,15 @@ def test_example_files_download_and_parse():
 def test_list_surplus_creates_passports_labelled_sample():
     text = (EX / "durable_stock_example.csv").read_text()
     r = c.post("/api/import/list", json={"lane": "durable", "csv_text": text}).json()
-    assert r["listed"] == 5 and r["label"] == "sample"
+    assert r["listed"] == 8 and r["label"] == "sample"
     items = c.get("/api/stock/import_durable").json()["items"]
-    assert len(items) == 5 and all(i["label"] == "sample" and i["scrap_value"] is None for i in items)
-    assert {i["id"] for i in items} == {"MS-102", "MS-103", "MS-104", "AL-201", "SS-301"}  # working stock is not listed
+    assert len(items) == 8 and all(i["label"] == "sample" and i["scrap_value"] is None for i in items)
+    assert {i["id"] for i in items} == {"MS-102", "MS-103", "MS-104", "AL-201", "SS-301", "TMT-501", "TMT-502", "SP-601"}  # working stock is not listed
     page = c.get(items[0]["passport"])
     assert page.status_code == 200 and "Import from ERP or POS export (CSV)" in page.text and "No scrap price" in page.text
     assert c.get("/labels/import_durable").status_code == 200
     assert c.get("/api/stock/import_fresh").json()["items"] == []
-    assert c.post("/api/import/clear", params={"lane": "durable"}).json()["removed"] == 5
+    assert c.post("/api/import/clear", params={"lane": "durable"}).json()["removed"] == 8
 
 
 def test_measured_only_when_ticked_and_shown_in_data_quality():

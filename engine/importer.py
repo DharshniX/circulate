@@ -6,8 +6,12 @@ file from whatever they use, uploads it, and every row is checked with the
 same Pydantic models the engines use. Rows that fail are returned with the
 reason, so the seller knows what to fix in their export.
 
+Durable rows are sheets, except bar materials (TMT rebar): those need diameter_mm, leave width_mm and
+thickness_mm empty, and use is_full_sheet for "a full-length bar". Bar weight per metre comes from the
+site rule d x d / 162, an assumption. Shuttering plywood is 12 or 18 mm, and new, used once or used many times.
+
 Surplus detection rules (platform rules, editable thresholds):
-  Durable  offcut     the piece is not a full sheet
+  Durable  offcut     the piece is not a full sheet (or not a full-length bar)
            idle       days_unused is at least N (default 30)
   Fresh    urgent     hours_left is at most H (default 24)
 An item is surplus if any rule catches it; everything else is kept as
@@ -23,7 +27,7 @@ from typing import Literal
 from pydantic import Field, ValidationError
 
 from . import materials as M
-from .models import DataLabel, FlatPiece, PerishableLot
+from .models import DataLabel, FlatPiece, LinearStock, PerishableLot
 
 Lane = Literal["durable", "fresh"]
 SOURCE = "Import from ERP or POS export (CSV)"
@@ -33,6 +37,7 @@ COLUMNS: dict[str, list[str]] = {
                 "is_full_sheet", "days_unused"],
     "fresh": ["item_id", "seller_id", "product", "category", "quantity_kg", "storage", "hours_left"],
 }
+OPTIONAL: dict[str, list[str]] = {"durable": ["diameter_mm"], "fresh": []}  # diameter_mm: bars only
 _LOWER = {"material", "condition", "category", "storage"}  # enum-like columns: "Mild Steel" -> "mild_steel"
 
 
@@ -40,6 +45,29 @@ class ImportedSheet(FlatPiece):
     """A FlatPiece plus the one column the stock export adds."""
 
     days_unused: int = Field(ge=0, le=36500, description="Days since the piece was last used")
+
+
+class ImportedBar(LinearStock):
+    """A bar (TMT rebar) from a Durable stock file: LinearStock plus days unused."""
+
+    days_unused: int = Field(ge=0, le=36500, description="Days since the bar was last used")
+
+
+class FieldError(ValueError):
+    """A problem with one column, so manual entry can show it next to that field."""
+
+    def __init__(self, field: str, message: str):
+        super().__init__(f"{field}: {message}")
+        self.field, self.message = field, message
+
+
+def parse_item(lane: Lane, text: str):
+    """A stored listed item (JSON) back as its model: a sheet, a bar or a fresh lot."""
+    import json
+    data = json.loads(text)
+    if lane == "fresh":
+        return PerishableLot(**data)
+    return ImportedBar(**data) if data.get("kind") == "linear" else ImportedSheet(**data)
 
 
 def _norm(col: str, v: str) -> str:
@@ -84,26 +112,62 @@ def read_rows(lane: Lane, text: str) -> list[dict]:
 
 
 def _build(lane: Lane, raw: dict, label: DataLabel):
-    vals = {c: _norm(c, raw.get(c) or "") for c in COLUMNS[lane]}
+    vals = {c: _norm(c, raw.get(c) or "") for c in COLUMNS[lane] + OPTIONAL[lane]}
     vals = {c: v for c, v in vals.items() if v != ""}  # empty cell -> "Field required"
     if "item_id" in vals:
         vals["id"] = vals.pop("item_id")
     if lane == "durable":
         if "material" in vals:
             M.get(vals["material"])  # unknown material -> ValueError with the known list
+        if vals.get("material") in M.BAR_MATERIALS:
+            return _bar(vals, label)
+        vals.pop("diameter_mm", None)
+        if vals.get("material") == "shuttering_plywood":
+            _shuttering(vals)
         return ImportedSheet(**vals, label=label)
     return PerishableLot(**vals, label=label)
+
+
+def _bar(vals: dict, label: DataLabel) -> ImportedBar:
+    """A TMT rebar row: the diameter gives the profile and, by the site rule, the weight per metre."""
+    try:
+        d = float(vals.get("diameter_mm", ""))
+    except ValueError:
+        raise FieldError("diameter_mm", f"choose a bar diameter: {', '.join(f'{x}' for x in M.REBAR_DIAMETERS_MM)} mm")
+    if d not in M.REBAR_DIAMETERS_MM:
+        raise FieldError("diameter_mm", f"choose a bar diameter: {', '.join(f'{x}' for x in M.REBAR_DIAMETERS_MM)} mm")
+    grade = M.rebar_grade(vals.get("grade", ""))
+    if grade is None:
+        raise FieldError("grade", f"choose a TMT grade: {', '.join(M.REBAR_GRADES)}")
+    return ImportedBar(id=vals.get("id"), seller_id=vals.get("seller_id"), material=vals["material"], profile=M.rebar_profile(d),
+                       length_mm=vals.get("length_mm"), mass_per_m_kg=round(M.rebar_kg_per_m(d), 3), grade=grade,
+                       condition=vals.get("condition", "good"), is_full_length=vals.get("is_full_sheet", "false"),
+                       days_unused=vals.get("days_unused"), label=label)
+
+
+def _shuttering(vals: dict) -> None:
+    try:
+        t = float(vals.get("thickness_mm", ""))
+    except ValueError:
+        t = None
+    if t is not None and t not in M.SHUTTERING_THICKNESSES_MM:
+        raise FieldError("thickness_mm", "shuttering plywood is 12 or 18 mm")
+    if vals.get("condition") not in M.USE_CONDITIONS:
+        raise FieldError("condition", "for shuttering plywood choose new, used once or used many times")
 
 
 def detect(lane: Lane, item, days_unused_limit: int, hours_left_limit: float) -> tuple[list[str], str | None]:
     """Return (rules that caught it, reason it was kept). Exactly one of the two is empty."""
     rules = []
     if lane == "durable":
-        if not item.is_full_sheet:
+        if item.kind == "linear" and not item.is_full_length:
+            rules.append("Offcut: not a full-length bar")
+        elif item.kind == "flat" and not item.is_full_sheet:
             rules.append("Offcut: not a full sheet")
         if item.days_unused >= days_unused_limit:
             rules.append(f"Unused for {item.days_unused} days (limit {days_unused_limit})")
-        return rules, None if rules else f"Full sheet, used within the last {days_unused_limit} days"
+        whole = "Full-length bar" if item.kind == "linear" else "Full sheet"
+        return rules, None if rules else f"{whole}, used within the last {days_unused_limit} days"
     if item.hours_left <= hours_left_limit:
         rules.append(f"Urgent: {item.hours_left:g} h left (limit {hours_left_limit:g} h)")
     return rules, None if rules else f"{item.hours_left:g} h left, more than {hours_left_limit:g} h"
@@ -172,6 +236,8 @@ def check_one(lane: Lane, values: dict, days_unused_limit: int = 30, hours_left_
         item = _build(lane, raw, label)
     except ValidationError as e:
         return {"ok": False, "errors": {**_field_errors(e), **errors}}
+    except FieldError as e:
+        return {"ok": False, "errors": {e.field: e.message[0].upper() + e.message[1:] + ".", **errors}}
     if errors:
         return {"ok": False, "errors": errors}
     rules, kept_reason = detect(lane, item, days_unused_limit, hours_left_limit)

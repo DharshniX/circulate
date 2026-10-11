@@ -22,7 +22,7 @@ from typing import Annotated, Literal, Union
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 DataLabel = Literal["measured", "sample", "assumption"]
-Condition = Literal["new", "good", "surface_rust", "bent", "damaged"]
+Condition = Literal["new", "good", "surface_rust", "bent", "damaged", "used_once", "used_many_times"]  # used: shuttering plywood
 
 
 class Settings(BaseModel):

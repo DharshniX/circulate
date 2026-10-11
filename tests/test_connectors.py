@@ -104,10 +104,10 @@ def test_connectors_endpoint_and_planned_sync_refused():
 def test_new_file_is_imported_and_listed_as_sample(drop):
     write(drop / "stock_2026-10-08.csv", EXAMPLE)
     [e] = sync()
-    assert (e["status"], e["file"], e["rows_read"], e["surplus"], e["rejected"], e["listed"]) == ("imported", "stock_2026-10-08.csv", 11, 5, 3, 5)
+    assert (e["status"], e["file"], e["rows_read"], e["surplus"], e["rejected"], e["listed"]) == ("imported", "stock_2026-10-08.csv", 14, 8, 3, 8)
     assert e["label"] == "sample" and len(e["details"]) == 3 and e["message"] == "New file."
     items = listed()
-    assert len(items) == 5 and all(i["label"] == "sample" for i in items)
+    assert len(items) == 8 and all(i["label"] == "sample" for i in items)
     assert c.get(items[0]["passport"]).status_code == 200  # same passports and QR codes as an upload
     assert (drop / "stock_2026-10-08.csv").read_bytes() == EXAMPLE  # the seller's file is untouched
 
@@ -141,7 +141,7 @@ def test_bad_files_are_logged_and_not_retried_until_they_change(drop):
     assert entries["empty.csv"]["status"] == "error" and "empty" in entries["empty.csv"]["message"]
     assert "Missing column" in entries["wrong_lane.csv"]["message"]
     assert "not a text CSV" in entries["binary.csv"]["message"]
-    assert len(listed()) == 5  # the bad files listed nothing
+    assert len(listed()) == 8  # the bad files listed nothing
     assert sync() == []  # a bad file is not retried every minute
     write(drop / "empty.csv", HEAD + b"Q1,A,mild_steel,800,400,3,E250,good,false,5\n")
     [fixed] = sync()
@@ -180,7 +180,7 @@ def test_background_pass_only_syncs_enabled_lanes(drop, tmp_path):
     write(fresh / "lots.csv", FRESH_EXAMPLE)
     c.put("/api/connectors/folder/fresh", json={"path": str(fresh), "enabled": False})
     done = main.sync_all_enabled()
-    assert list(done) == ["durable"] and done["durable"][0]["surplus"] == 5
+    assert list(done) == ["durable"] and done["durable"][0]["surplus"] == 8
     assert listed("fresh") == []
 
 

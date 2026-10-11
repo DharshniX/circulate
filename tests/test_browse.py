@@ -64,7 +64,7 @@ def test_imported_stock_appears_without_invented_prices():
     text = (main.EXAMPLES / "durable_stock_example.csv").read_text()
     c.post("/api/import/list", json={"lane": "durable", "csv_text": text, "measured": True})
     imp = [i for i in items("durable").values() if i["key"] == "import_durable@admin"]  # the admin's own test items
-    assert len(imp) == 5 and all(i["label"] == "measured" for i in imp)
+    assert len(imp) == 8 and all(i["label"] == "measured" for i in imp)  # 6 sheets and 2 rebar ends
     assert all(i["floor"] is None and i["ceiling"] is None for i in imp)  # still no invented prices on the card
     # the admin's own items are matched as "Your workshop": an order to open, or the engine's reason why none fits
     assert all(i["match_seller"] == "YOU" and (i["order"] or i["order_reason"]) for i in imp)

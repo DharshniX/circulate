@@ -61,6 +61,8 @@ function badge(kind, text) {
   return b ? `<span class="pill ${b[0]}" title="${esc(b[2])}">${esc(text || b[1])}</span>` : `<span class="pill p-mut">${esc(text || kind)}</span>`;
 }
 const chip = l => badge(l);
+/* Workshop, Construction site, Shop or Kitchen, after a seller's name (sample sellers without an account have none). */
+const typeChip = it => it && it.seller_type_name ? ` <span class="pill p-mut stype" title="Seller type">${esc(it.seller_type_name)}</span>` : "";
 function toast(html, kind = "ok") {
   const t = document.createElement("div");
   t.className = `toast ${kind}`;
@@ -150,6 +152,7 @@ const TITLES = {
   gapfill: ["Sold before it's cut", "Sell the empty part of your next sheet to nearby buyers before you cut it."],
   offers: ["Offers and recovery plan", "Which buyers to try, in which order, before the deadline. Scrap or disposal is the last step."],
   stock: ["Stock and passports", "Every piece or lot, its scrap value, and a passport with a QR code."],
+  collections: ["Collection requests", "Sellers asking for a pickup. Pickup by a hired vehicle; CIRCULATE never buys or stores goods."],
   monitor: ["Deal monitor", "Every deal by stage. Simulated deals are never counted as verified."],
   quality: ["Data quality", "How much of what the app shows is measured, sample, simulated or verified."],
   prices: ["Price references", "Every price the engine uses, with its source and date."],
@@ -348,7 +351,9 @@ async function vPost(el) {
     g1 = [fld("part_name", "Part name", txt("part_name", "e.g. baluster"), "wide"),
       fld("profile", "Bar or tube", `<select data-post="profile" ${bad("profile")}>${O.profiles.map(x => `<option value="${esc(x.profile)}" ${x.profile === F.profile ? "selected" : ""}>${esc(cap1(x.profile))} · ${num(x.mass_per_m_kg, 2)} kg/m</option>`).join("")}</select>`),
       fld("cut_length_mm", "Cut length (mm)", num_("cut_length_mm", "decimal", "e.g. 450")), fld("quantity", "How many", num_("quantity", "numeric", "e.g. 30"))];
-    g2 = [grp("accepted_grades", "Grades you accept", chips("accepted_grades", O.bar_grades.map(g => [g, g])), "wide"),
+    const prof = O.profiles.find(x => x.profile === F.profile) || {};
+    g1.push(prof.weight_note ? `<p class="note mfield wide">${badge("assumption")} ${esc(prof.weight_note)}</p>` : "");
+    g2 = [grp("accepted_grades", "Grades you accept", chips("accepted_grades", (prof.grades || O.bar_grades).map(g => [g, g])), "wide"),
       grp("accepted_conditions", "Conditions you accept", chips("accepted_conditions", O.conditions.map(c => [c, words(c)])), "wide")];
   } else {
     g1 = [grp("categories", "What you need", chips("categories", O.categories.map(c => [c, words(c)])), "wide"), fld("quantity", "How much (kg)", num_("quantity", "decimal", "e.g. 20"))];
@@ -382,7 +387,7 @@ async function vPost(el) {
       [F.x_km, F.y_km] = myXY(O.centre[i.value === "mild_steel" ? "steel" : "sheets"]);
       render();
     }
-    if (i.dataset.post === "profile") { const pr = O.profiles.find(x => x.profile === i.value); F.new_price_per_kg = String(pr.sample_price ?? ""); }
+    if (i.dataset.post === "profile") { const pr = O.profiles.find(x => x.profile === i.value); F.new_price_per_kg = String(pr.sample_price ?? ""); F.accepted_grades = [(pr.grades || O.bar_grades)[pr.grades ? 1 : 0]]; render(); }
   }; });
   form.querySelectorAll("[data-chip]").forEach(i => i.onchange = () => {
     const k = i.dataset.chip; F[k] = i.checked ? [...new Set([...F[k], i.value])] : F[k].filter(v => v !== i.value);
@@ -484,7 +489,7 @@ function productCard(it, lane) {
   return `<article class="pcard" tabindex="0" data-open="${esc(uid)}" aria-label="${esc(itemTitle(it))}">${itemMedia(it)}
     <div class="pbody"><div class="ptitle"><h3>${esc(itemTitle(it))}</h3>${labelChip(it.label)}</div>
       ${specChips(it)}${it.kind === "perishable" ? freshBar(it.hours_left) : ""}${priceLine(it)}
-      <div class="who"><span title="${esc(it.seller_name)}">${ic("building-2", "sm")}${esc(short(it.seller_name))}</span><span>${ic("map-pin", "sm")}${dist}</span></div>
+      <div class="who"><span title="${esc(it.seller_name)}">${ic("building-2", "sm")}${esc(short(it.seller_name))}${typeChip(it)}</span><span>${ic("map-pin", "sm")}${dist}</span></div>
       <div class="pact"><button class="btn np" type="button" data-order="${esc(uid)}" ${it.order ? "" : "disabled"}>${lane === "fresh" ? "Order from this" : "Order parts from this"}</button><button class="btn" type="button" data-become="${esc(uid)}">What can this become?</button></div>
       ${it.order ? "" : `<p class="why">${ic("info", "sm")}<span>${esc(it.order_reason)}</span></p>`}</div></article>`;
 }
@@ -493,8 +498,8 @@ async function openItem(it, focusBecome) {
   const specs = it.kind === "perishable"
     ? [["Product", it.product], ["Category", words(it.category)], ["Quantity", `${num(it.quantity_kg, 1)} kg`], ["Storage", words(it.storage)], ["Shelf life left", `${num(it.hours_left, 1)} hours`]]
     : it.kind === "flat" ? [["Material", `${it.material_name}, ${it.grade}`], ["Size", `${num(it.length_mm)} × ${num(it.width_mm)} mm`], ["Thickness", `${num(it.thickness_mm, it.thickness_mm % 1 ? 1 : 0)} mm`], ["Condition", words(it.condition)], ["Weight", `${num(it.kg, 1)} kg`]]
-    : [["Profile", cap1(it.profile)], ["Length", `${num(it.length_mm)} mm`], ["Material", `${it.material_name}, ${it.grade}`], ["Condition", words(it.condition)], ["Weight", `${num(it.kg, 1)} kg`]];
-  specs.push(["Seller", it.seller_name], ["Distance", it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km${it.approx_location ? ` (${APPROX})` : ""}`], ["Item", it.id]);
+    : [["Profile", cap1(it.profile)], ["Length", `${num(it.length_mm)} mm`], ["Material", `${it.material_name}, ${it.grade}`], ["Condition", words(it.condition)], ["Weight", `${num(it.kg, 1)} kg${it.weight_note ? " (assumption: diameter² / 162 kg per metre)" : ""}`]];
+  specs.push(["Seller", `${it.seller_name}${it.seller_type_name ? ` (${it.seller_type_name})` : ""}`], ["Distance", it.distance_km == null ? "Location not given" : `${num(it.distance_km, 1)} km${it.approx_location ? ` (${APPROX})` : ""}`], ["Item", it.id]);
   const d = drawer.open(esc(itemTitle(it)), `${photoHtml(it)}
     <div class="ctrl">${labelChip(it.label)}${it.rules ? `<span class="pill p-mut" title="${esc(it.rules.join("; "))}">${esc(it.source || "Imported")}</span>` : ""}</div>
     ${priceLine(it)}${it.kind === "perishable" ? freshBar(it.hours_left) : ""}
@@ -689,7 +694,7 @@ async function vDeals(el, admin) {
 
 /* ---------------- Seller: stock intake helpers (CSV import and surplus detection) ---------------- */
 const IMP_COLS = {
-  durable: "item_id, seller_id, material, length_mm, width_mm, thickness_mm, grade, condition, is_full_sheet, days_unused",
+  durable: "item_id, seller_id, material, length_mm, width_mm, thickness_mm, grade, condition, is_full_sheet, days_unused, diameter_mm (TMT rebar only; leave width and thickness empty)",
   fresh: "item_id, seller_id, product, category, quantity_kg, storage, hours_left",
 };
 function impDesc(lane, it) {
@@ -856,6 +861,9 @@ async function vAddSync(el) {
 
 async function vAddManual(el) {
   const lane = st.lane, O = await api("/api/manual/options");
+  if (lane === "durable" && !st.man.durable._picked) {  // a construction site starts on its own materials (listed first)
+    st.man.durable._picked = true; st.man.durable.material = O.materials[0].key; manDefaults(st.man.durable);
+  }
   el.innerHTML = addHead("Manual entry") + manualCard(lane, O);
   bindAdd(el);
   bindManual(el, lane);
@@ -884,12 +892,18 @@ function manualCard(lane, O) {
   const words = v => v.replace(/_/g, " ").replace(/^./, c => c.toUpperCase());
   const photo = `<div class="mphoto"><label class="btn bigbtn"><input type="file" id="manPhoto" class="vh" accept="image/*" capture="environment">${ph ? "Retake or change photo" : "Take or choose a photo (optional)"}</label>
     ${ph ? `<img class="mthumb" src="${ph}" alt="Your photo of this item"><button class="btn sm" type="button" id="manPhotoDel">Remove photo</button>` : `<span class="note">Opens the camera on a phone. Only your own photo of this item.</span>`}${err("photo")}</div>`;
+  const bar = durable && (O.materials.find(m => m.key === F.material) || {}).bar, ply = durable && F.material === "shuttering_plywood";
+  const whole = bar ? "Full-length bar" : "Full sheet";
   const fields = durable ? [
     fld("material", "Material", sel("material", O.materials.map(m => [m.key, m.name]))),
-    fld("is_full_sheet", "Full sheet or offcut", `<div class="opts" role="radiogroup" aria-label="Full sheet or offcut"><label><input type="radio" name="manFull" value="false" ${F.is_full_sheet ? "" : "checked"}>Offcut</label><label><input type="radio" name="manFull" value="true" ${F.is_full_sheet ? "checked" : ""}>Full sheet</label></div>`),
-    fld("length_mm", "Length mm", numIn("length_mm", "decimal", 'placeholder="e.g. 1250"')), fld("width_mm", "Width mm", numIn("width_mm", "decimal", 'placeholder="e.g. 600"')),
-    fld("thickness_mm", "Thickness mm", numIn("thickness_mm", "decimal", 'placeholder="e.g. 3"')), fld("grade", "Grade", `<input data-man="grade" type="text" autocapitalize="characters" value="${esc(F.grade)}" ${bad("grade")}>`),
-    fld("condition", "Condition", sel("condition", O.conditions.map(c => [c, words(c)]))), fld("days_unused", "Days unused", numIn("days_unused", "numeric", 'placeholder="e.g. 45"')),
+    fld("is_full_sheet", `${whole} or offcut`, `<div class="opts" role="radiogroup" aria-label="${whole} or offcut"><label><input type="radio" name="manFull" value="false" ${F.is_full_sheet ? "" : "checked"}>Offcut</label><label><input type="radio" name="manFull" value="true" ${F.is_full_sheet ? "checked" : ""}>${whole}</label></div>`),
+    fld("length_mm", "Length mm", numIn("length_mm", "decimal", `placeholder="e.g. ${bar ? 1800 : 1250}"`)),
+    ...(bar ? [fld("diameter_mm", "Bar diameter", sel("diameter_mm", O.rebar.diameters_mm.map(d => [String(d), `${d} mm · ${num(O.rebar.kg_per_m[String(d)], 3)} kg/m`]))),
+               `<p class="note mfield wide">${badge("assumption")} ${esc(O.rebar.weight_note)}</p>`]
+      : [fld("width_mm", "Width mm", numIn("width_mm", "decimal", 'placeholder="e.g. 600"')),
+         fld("thickness_mm", "Thickness mm", ply ? sel("thickness_mm", O.shuttering.thicknesses_mm.map(t => [String(t), `${t} mm`])) : numIn("thickness_mm", "decimal", 'placeholder="e.g. 3"'))]),
+    fld("grade", "Grade", bar ? sel("grade", O.rebar.grades.map(g => [g, g])) : `<input data-man="grade" type="text" autocapitalize="characters" value="${esc(F.grade)}" ${bad("grade")}>`),
+    fld("condition", "Condition", sel("condition", (ply ? O.shuttering.conditions : O.conditions).map(c => [c, words(c)]))), fld("days_unused", "Days unused", numIn("days_unused", "numeric", 'placeholder="e.g. 45"')),
   ] : [
     fld("product", "Product", `<input data-man="product" type="text" autocapitalize="sentences" placeholder="e.g. Tomatoes" value="${esc(F.product)}" ${bad("product")}>`, true),
     fld("category", "Category", sel("category", O.categories.map(c => [c, words(c)]))), fld("storage", "Storage", sel("storage", O.storage.map(c => [c, words(c)]))),
@@ -911,10 +925,20 @@ function manualCard(lane, O) {
       ${E.item ? `<p class="err">${esc(E.item)}</p>` : ""}</form>
     <div id="manRes" aria-live="polite">${res}</div></div>`;
 }
+/* Sensible values when the material changes: rebar has its own grades and diameters; shuttering plywood is 12 or 18 mm, new or used. */
+const REBAR = ["Fe415", "Fe500", "Fe500D", "Fe550", "Fe550D"], USED = ["new", "used_once", "used_many_times"];
+function manDefaults(F) {
+  if (F.material === "tmt_rebar") { if (!REBAR.includes(F.grade)) F.grade = "Fe500"; if (!F.diameter_mm) F.diameter_mm = "12"; if (USED.slice(1).includes(F.condition)) F.condition = "good"; }
+  else {
+    if (REBAR.includes(F.grade)) F.grade = F.material === "shuttering_plywood" ? "BWP" : "E250";
+    if (F.material === "shuttering_plywood") { if (!["12", "18"].includes(String(F.thickness_mm))) F.thickness_mm = "18"; if (!USED.includes(F.condition)) F.condition = "used_once"; if (F.grade === "E250") F.grade = "BWP"; }
+    else if (USED.slice(1).includes(F.condition)) F.condition = "good";
+  }
+}
 function bindManual(el, lane) {
   const F = st.man[lane], form = $("#manForm", el);
   if (!form) return;
-  form.querySelectorAll("[data-man]").forEach(i => { i.oninput = i.onchange = () => { F[i.dataset.man] = i.value; }; });
+  form.querySelectorAll("[data-man]").forEach(i => { i.oninput = i.onchange = () => { F[i.dataset.man] = i.value; if (i.dataset.man === "material") { manDefaults(F); render(); } }; });
   form.querySelectorAll('input[name="manFull"]').forEach(i => i.onchange = () => { F.is_full_sheet = i.value === "true"; });
   form.querySelectorAll('input[name="manMode"]').forEach(i => i.onchange = () => { F.mode = i.value; render(); });
   $("#manMeas", el).onchange = e => { st.manMeasured[lane] = e.target.checked; render(); };
@@ -928,7 +952,8 @@ function bindManual(el, lane) {
   const tb = $("#manToBrowse", el); if (tb) { if (allowed("browse")) tb.onclick = () => go({view: "browse"}); else tb.remove(); }
   const send = async anyway => {
     const fields = {...F}, body = {fields, days_unused_limit: st.impLimit.days, hours_left_limit: st.impLimit.hours, measured: st.manMeasured[lane], list_anyway: anyway, photo: st.manPhoto[lane]};
-    delete fields.mode; delete fields.use_by;
+    delete fields.mode; delete fields.use_by; delete fields._picked;
+    if (lane === "durable" && F.material === "tmt_rebar") { delete fields.width_mm; delete fields.thickness_mm; } else delete fields.diameter_mm;
     if (lane === "fresh" && F.mode === "useby") { delete fields.hours_left; body.use_by = F.use_by || null; if (!F.use_by) { st.manErr[lane] = {use_by: "Pick the use-by date and time."}; st.manRes[lane] = null; await render(); return; } }
     if (anyway && st.manRes[lane]) fields.item_id = st.manRes[lane].item_id;
     const b = $("#manSubmit", el); if (b) { b.disabled = true; b.textContent = "Checking…"; }
@@ -1087,17 +1112,94 @@ async function vStock(el) {
   h += `<div class="tiles"><div class="tile"><b>${items.length}</b><span>${fresh ? "Lots" : "Pieces"} in stock</span></div><div class="tile"><b>${num(kg, 0)} kg</b><span>Total weight</span></div><div class="tile"><b>${inr(total)}</b><span>${fresh ? "Disposal value (negative = a cost)" : "Worth as scrap today"}</span></div>${fresh ? `<div class="tile hi"><b>${items.filter(x => x.hours_left < 12).length}</b><span>Lots with under 12 hours left</span></div>` : ""}</div>`;
   h += `<div class="card"><h2>${fresh ? "Lots, most urgent first" : "Pieces"}</h2>${items.length ? `<div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th>${fresh ? "<th>Shelf life left</th>" : ""}<th class="n">kg</th><th class="n">${fresh ? "Disposal" : "Scrap value"}</th><th>Data</th><th class="noprint"></th></tr>${items.map(x => {
     const url = location.origin + x.passport;
-    return `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(url)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td>${fresh ? `<td style="min-width:140px"><div class="bar ${x.hours_left < 12 ? "warn" : "pe"}"><i style="width:${Math.max(3, Math.min(1, x.hours_left / maxH) * 100)}%"></i></div><span class="note">${num(x.hours_left)} h</span></td>` : ""}<td class="n">${num(x.kg, 1)}</td><td class="n">${inr(x.scrap_value)}</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/${k}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`;
+    return `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(url)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}${typeChip(x)}</td><td class="w">${esc(x.description)}</td>${fresh ? `<td style="min-width:140px"><div class="bar ${x.hours_left < 12 ? "warn" : "pe"}"><i style="width:${Math.max(3, Math.min(1, x.hours_left / maxH) * 100)}%"></i></div><span class="note">${num(x.hours_left)} h</span></td>` : ""}<td class="n">${num(x.kg, 1)}</td><td class="n">${inr(x.scrap_value)}</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/${k}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`;
   }).join("")}</table></div>` : `<div class="empty">No stock for this seller.</div>`}
   <p class="note">Each QR opens the item's passport on this computer's address. For phones on the same Wi-Fi, open the app at the laptop's network address (see README) before printing labels.</p></div>`;
   if (imp.items.length) h = `<div class="card"><div class="ctrl"><h2>Listed from your import (${imp.items.length})</h2><div class="grow"></div><a class="btn" href="${esc(imp.labels)}" target="_blank" rel="noopener">Print QR labels</a><button class="btn" id="impClear" type="button">${SESSION.role === "admin" ? "Remove every seller's listed stock" : "Remove my listed stock"}</button></div>
     <p class="mut">Listed from Connect your system: a CSV import, the auto-sync folder, or an item added by hand.</p>
-    <div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th><th>Found by</th><th class="n">kg</th><th class="n">Scrap value</th><th>Data</th><th class="noprint"></th></tr>${imp.items.map(x => `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(location.origin + x.passport)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}</td><td class="w">${esc(x.description)}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td><td class="n">${num(x.kg, 1)}</td><td class="n">–</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/${encodeURIComponent(x.key)}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`).join("")}</table></div>
+    <div class="scroll"><table><tr><th>Passport</th><th>ID</th><th>Seller</th><th>What it is</th><th>Found by</th><th class="n">kg</th><th class="n">Scrap value</th><th>Data</th><th class="noprint"></th></tr>${imp.items.map(x => `<tr><td><a href="${esc(x.passport)}" target="_blank" rel="noopener" title="Open passport"><img class="qr" alt="QR code for ${esc(x.id)}" src="/api/qr.svg?data=${encodeURIComponent(location.origin + x.passport)}"></a></td><td><a href="${esc(x.passport)}" target="_blank" rel="noopener">${esc(x.id)}</a></td><td>${esc(x.seller_name)}${typeChip(x)}</td><td class="w">${esc(x.description)}${x.weight_note ? ` <span class="note">(weight: ${badge("assumption")} d²/162)</span>` : ""}</td><td class="w">${x.urgent ? '<span class="pill p-bad">Urgent</span> ' : ""}${x.rules.map(esc).join("<br>")}</td><td class="n">${num(x.kg, 1)}</td><td class="n">–</td><td>${chip(x.label)}</td><td class="noprint"><a class="btn sm" href="/share/${encodeURIComponent(x.key)}/${encodeURIComponent(x.id)}" target="_blank" rel="noopener" title="Opens WhatsApp with this item's details; you choose the chat">${ic("message-circle", "sm")}Share on WhatsApp</a></td></tr>`).join("")}</table></div>
     <p class="note">No scrap price is shown for imported items until a dated quote is entered.</p></div>` + h;
+  let own = [], C = null;
+  if (SESSION.role === "seller") {  // every seller can ask for a pickup of its own items
+    own = [...r.items.map(x => ({...x, key: k})), ...imp.items];
+    C = await api("/api/collections");
+    h = collectionsCard(C, own.length) + h;  // the action comes first
+  }
   el.innerHTML = h;
   bindScen(el);
+  const rc = $("#reqCollect", el); if (rc) rc.onclick = () => openCollect(own, C);
   const impClr = $("#impClear", el); if (impClr) impClr.onclick = async () => { await api(`/api/import/clear?lane=${st.lane}`, {}); render(); };
   $("#sf", el).onchange = e => { st.sellerFilter = e.target.value; render(); };
+}
+
+/* ---------------- Seller: collection requests (asset-light: a hired vehicle, CIRCULATE never holds the goods) ---------------- */
+const COL_PILL = {requested: "p-warn", matched: "p-np", vehicle_booked: "p-ok", closed: "p-mut"};
+function collectionsCard(C, n) {
+  const L = C.requests;
+  return `<div class="card" id="colCard"><div class="ctrl"><h2>Collection requests</h2><div class="grow"></div>
+      <button class="btn pri" type="button" id="reqCollect" ${n ? "" : "disabled"}>${ic("truck", "sm")}Request collection</button></div>
+    <p class="mut">${esc(C.pickup)} Pick items, a preferred date and slot; the CIRCULATE team matches them to a buyer and books the vehicle.</p>
+    ${L.length ? `<div class="scroll"><table><tr><th>Request</th><th>Items</th><th class="n">Weight</th><th>Preferred pickup</th><th>Status</th></tr>${L.map(c => `<tr>
+      <td>C${c.id}<div class="note">${esc(new Date(c.created_at).toLocaleDateString("en-IN"))}</div></td><td class="w">${c.item_count} item${c.item_count === 1 ? "" : "s"}${c.note ? `<div class="note">Pickup point: ${esc(c.note)}</div>` : ""}</td>
+      <td class="n">${num(c.weight_kg, 1)} kg</td><td>${esc(c.pickup_date)}<div class="note">${esc(c.slot)}</div></td>
+      <td><span class="pill ${COL_PILL[c.status]}">${esc(c.status_text)}</span></td></tr>`).join("")}</table></div>`
+      : `<div class="empty">${n ? "No collection requests yet. Press Request collection to ask for a pickup." : "Add stock first; then you can request a collection."}</div>`}</div>`;
+}
+function openCollect(own, C) {
+  const today = new Date().toISOString().slice(0, 10), tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+  const d = drawer.open("Request collection", `<form id="colForm" class="form" novalidate>
+    <p class="note">${esc(C.pickup)}</p>
+    <fieldset class="colpick"><legend>Items to collect</legend>
+      <div class="ctrl"><button type="button" class="btn sm" id="colAll">Select all</button><span class="note" id="colSum" aria-live="polite">Nothing picked yet.</span></div>
+      <div class="colitems">${own.map((x, i) => `<label class="check"><input type="checkbox" data-ci="${i}"><span><b>${esc(x.id)}</b> ${esc(x.description)} · ${num(x.kg, 1)} kg</span></label>`).join("")}</div>
+      <span class="ferr" id="colerr-items"></span></fieldset>
+    <div class="mgrid"><label class="field mfield">Preferred date<input type="date" id="colDate" min="${today}" value="${tomorrow}"><span class="ferr" id="colerr-pickup_date"></span></label>
+      <label class="field mfield">Time slot<select id="colSlot">${C.slots.map(s => `<option>${esc(s)}</option>`).join("")}</select><span class="ferr" id="colerr-slot"></span></label>
+      <label class="field mfield wide">Pickup point note<textarea id="colNote" rows="2" maxlength="500" placeholder="e.g. Gate 2, ask for the site supervisor"></textarea></label></div>
+    <p class="err" id="colErr" role="alert" hidden></p>
+    <div class="actions"><button class="btn pri" type="submit" id="colGo">${ic("truck", "sm")}Request collection</button></div></form>`);
+  const boxes = [...d.querySelectorAll("[data-ci]")], sum = () => {
+    const picked = boxes.filter(b => b.checked).map(b => own[+b.dataset.ci]);
+    $("#colSum", d).textContent = picked.length ? `${picked.length} item${picked.length === 1 ? "" : "s"}, ${num(picked.reduce((a, x) => a + x.kg, 0), 1)} kg` : "Nothing picked yet.";
+  };
+  boxes.forEach(b => b.onchange = sum);
+  $("#colAll", d).onclick = () => { const all = !boxes.every(b => b.checked); boxes.forEach(b => { b.checked = all; }); sum(); };
+  $("#colForm", d).onsubmit = async e => {
+    e.preventDefault();
+    d.querySelectorAll(".ferr").forEach(x => { x.textContent = ""; });
+    const body = {items: boxes.filter(b => b.checked).map(b => ({key: own[+b.dataset.ci].key, id: own[+b.dataset.ci].id})),
+      pickup_date: $("#colDate", d).value || null, slot: $("#colSlot", d).value, note: $("#colNote", d).value};
+    const go = $("#colGo", d); go.disabled = true;
+    let r, t;
+    try { r = await fetch("/api/collections", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}); t = await r.json().catch(() => ({})); }
+    catch (x) { const er = $("#colErr", d); er.hidden = false; er.textContent = "The app could not be reached. Check that it is still running, then try again."; go.disabled = false; return; }
+    if (!r.ok) {
+      const es = (t.detail && t.detail.errors) || {};
+      for (const k in es) { const x = $(`#colerr-${k}`, d); if (x) x.textContent = es[k]; }
+      if (!Object.keys(es).length) { const er = $("#colErr", d); er.hidden = false; er.textContent = typeof t.detail === "string" ? t.detail : "Something went wrong. Try again."; }
+      go.disabled = false; return;
+    }
+    drawer.close();
+    toast(`Collection request C${t.id} sent: ${t.item_count} item${t.item_count === 1 ? "" : "s"}, ${num(t.weight_kg, 1)} kg. Pickup by a hired vehicle.`);
+    render();
+  };
+}
+/* Admin: every seller's collection requests, and their progress. */
+async function vCollections(el) {
+  const C = await api("/api/collections"), L = C.requests;
+  if (!L.length) { el.innerHTML = emptyState("package", "No collection requests yet. A seller asks for a pickup from My stock, and it appears here."); return; }
+  const next = {requested: ["matched", "vehicle_booked", "closed"], matched: ["vehicle_booked", "closed"], vehicle_booked: ["closed"], closed: []};
+  el.innerHTML = `<p class="callout note">${esc(C.pickup)}</p><div class="card"><div class="scroll"><table><tr><th>Request</th><th>Business</th><th>Items</th><th class="n">Weight</th><th>Requested slot</th><th>Status</th><th class="noprint">Mark as</th></tr>
+    ${L.map(c => `<tr><td>C${c.id}<div class="note">${esc(new Date(c.created_at).toLocaleDateString("en-IN"))}</div></td>
+      <td><b>${esc(short(c.business_name))}</b><div class="note">${esc(c.area || "–")}</div></td>
+      <td class="w"><details><summary>${c.item_count} item${c.item_count === 1 ? "" : "s"}</summary><ul class="rej">${c.items.map(i => `<li><code>${esc(i.id)}</code> ${esc(i.description)} · ${num(i.kg, 1)} kg</li>`).join("")}</ul></details>${c.note ? `<div class="note">Pickup point: ${esc(c.note)}</div>` : ""}</td>
+      <td class="n">${num(c.weight_kg, 1)} kg</td><td>${esc(c.pickup_date)}<div class="note">${esc(c.slot)}</div></td>
+      <td><span class="pill ${COL_PILL[c.status]}">${esc(c.status_text)}</span> ${chip(c.label)}</td>
+      <td class="noprint"><span class="ctrl">${next[c.status].map(s => `<button class="btn sm" type="button" data-col="${c.id}" data-to="${s}">${esc(C.statuses[s])}</button>`).join("") || '<span class="note">Done</span>'}</span></td></tr>`).join("")}</table></div></div>`;
+  el.querySelectorAll("[data-col]").forEach(b => b.onclick = async () => {
+    try { const t = await api(`/api/collections/${b.dataset.col}/status`, {status: b.dataset.to}); toast(`C${t.id}: ${esc(t.status_text)}.`); render(); }
+    catch (e) { toast(esc(e.message), "bad"); }
+  });
 }
 
 /* ---------------- Buyer and seller: pickup and delivery (simulated transport) ---------------- */
@@ -1357,7 +1459,7 @@ async function vAccount(el) {
   el.innerHTML = `${SESSION.viewing_as ? `<p class="note">You are viewing the app as ${esc(SESSION.business_name)}. This page shows your own admin account.</p>` : ""}
   <div class="grid2">
     <div class="card"><h3>Profile</h3><div class="scroll"><table class="kv">
-      ${row("Business", A.business_name)}${row("Role", A.role_name)}${row("Seller type", A.seller_type_name)}${row("Contact", A.contact_name)}
+      ${row("Business", A.business_name)}${row("Role", A.role_name)}${A.seller_type_name ? `<tr><th scope="row">Seller type</th><td><span class="pill p-mut stype">${esc(A.seller_type_name)}</span></td></tr>` : ""}${row("Contact", A.contact_name)}
       ${row("Email", A.email)}${row("Phone", A.phone)}${row("Area", A.area)}${row("Lane", cap1(A.lane || ""))}${row("Member since", (A.created_at || "").slice(0, 10))}</table></div>
       <p class="note">To change these details, ask the CIRCULATE admin.</p>
       <div><button class="btn" type="button" data-logout>Log out</button></div></div>
@@ -1411,7 +1513,7 @@ async function vUsers(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {users: vUsers, account: vAccount, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, add: vAdd, "add-csv": vAddCsv, "add-sync": vAddSync, "add-manual": vAddManual, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {collections: vCollections, users: vUsers, account: vAccount, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, add: vAdd, "add-csv": vAddCsv, "add-sync": vAddSync, "add-manual": vAddManual, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();

@@ -127,7 +127,8 @@ def test_manual_entry_connector_and_options():
     keys = {x["key"]: x["status"] for x in c.get("/api/connectors").json()["connectors"]}
     assert keys["manual"] == "active" and len(keys) == 6
     o = c.get("/api/manual/options").json()
-    assert {"key": "mild_steel", "name": "Mild steel"} in o["materials"] and "chilled" in o["storage"] and "good" in o["conditions"]
+    assert {"key": "mild_steel", "name": "Mild steel", "bar": False} in o["materials"] and "chilled" in o["storage"] and "good" in o["conditions"]
+    assert {"key": "tmt_rebar", "name": "TMT rebar", "bar": True} in o["materials"] and o["rebar"]["grades"][1] == "Fe500"
 
 
 def test_data_quality_counts_hand_entered_items_separately():

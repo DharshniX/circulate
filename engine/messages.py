@@ -156,3 +156,11 @@ def wa_link(text: str, phone: str | None = None) -> str:
     """https://wa.me/<digits>?text=<urlencoded>, or https://wa.me/?text=<urlencoded> to let the person choose the chat."""
     q = urllib.parse.quote(text, safe="")
     return f"https://wa.me/{normalize_phone(phone)}?text={q}" if phone else f"https://wa.me/?text={q}"
+
+
+def collection_update(c: dict) -> str:
+    """A seller's collection request, on creation or a status change.
+    c: {id, business, status_text, items, kg, date, slot, link, label}. CIRCULATE never buys or stores the goods."""
+    body = (f"{c['business']}: collection request C{c['id']} is {c['status_text']}. {c['items']} item{'s' if c['items'] != 1 else ''}, "
+            f"{_n(round(c['kg'], 1))} kg, pickup {c['date']}, {c['slot']}. Pickup by a hired vehicle; CIRCULATE never buys or stores goods.")
+    return _compose(body, c.get("link"), c.get("label"))
