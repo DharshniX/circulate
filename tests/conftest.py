@@ -6,6 +6,7 @@ os.environ.setdefault("ADMIN_EMAIL", "admin@circulate.local")
 os.environ.setdefault("ADMIN_PASSWORD", "Admin@Test2026")
 os.environ.setdefault("DEMO_PASSWORD", "Circulate@2026")
 os.environ.setdefault("CIRCULATE_AUTOSYNC", "0")
+os.environ.setdefault("CIRCULATE_SAMPLE_NETWORK", "0")  # Kaveri's seeded stock and Ezhil's rebar order: on only in test_network.py
 
 ADMIN = (os.environ["ADMIN_EMAIL"], os.environ["ADMIN_PASSWORD"])
 DEMO_PASSWORD = os.environ["DEMO_PASSWORD"]

@@ -55,7 +55,7 @@ Every screen needs an account. Open http://127.0.0.1:8000, choose **I sell surpl
 or **Admin**, and sign in with an email and password.
 
 **Demo accounts (DEMO ONLY: these passwords are public, never use them for real data).**
-Password for all five: `Circulate@2026` (or whatever `DEMO_PASSWORD` is set to).
+Password for all six: `Circulate@2026` (or whatever `DEMO_PASSWORD` is set to).
 
 | Email | Business | Role |
 | --- | --- | --- |
@@ -64,6 +64,12 @@ Password for all five: `Circulate@2026` (or whatever `DEMO_PASSWORD` is set to).
 | `ezhil@demo.circulate` | Ezhil Engineering Works, Ambattur | Buyer (Durable) |
 | `anna@demo.circulate` | Anna Nagar Boys' Hostel Mess | Buyer (Fresh) |
 | `thozhan@demo.circulate` | Thozhan Food Bank, Saidapet | Buyer (Fresh, food bank) |
+| `kaveri@demo.circulate` | Kaveri Constructions (site), Porur | Seller (construction site, Durable) |
+
+On a fresh database the app also seeds **sample** network data, once: Kaveri's site stock (60 TMT rebar
+offcuts, Fe500 12 mm, 1.2 to 2.5 m; 10 sheets of 18 mm shuttering plywood, used once) and Ezhil's
+requirement for 40 pieces of 12 mm Fe500 bar, 1.0 m each. All of it is labelled Sample. Set
+`CIRCULATE_SAMPLE_NETWORK=0` to start without it (the tests do).
 
 On the seller and buyer sign-in pages, tapping a demo business only fills in its email and password;
 you still press Sign in.
@@ -92,7 +98,8 @@ Passports, QR codes, labels, Share on WhatsApp and the phone registration page (
 | `SECRET_KEY` | Signs the session cookie. Set a long random value on a server. If missing, a random key is kept in `.secret_key` (git-ignored). Changing it signs everyone out. |
 | `ADMIN_EMAIL` | The admin's email. Default `admin@circulate.local`. |
 | `ADMIN_PASSWORD` | The admin's password, used only when the admin account is first created. |
-| `DEMO_PASSWORD` | Password for the five demo accounts when they are first created. Default `Circulate@2026`. |
+| `DEMO_PASSWORD` | Password for the six demo accounts when they are first created. Default `Circulate@2026`. |
+| `CIRCULATE_SAMPLE_NETWORK` | `1` (default) seeds Kaveri's sample stock and Ezhil's sample rebar requirement once; `0` skips it. |
 | `AUTH_MODE` | `real` (default): email and password. `demo`: the old one-tap demo login, for emergencies only. |
 
 To make a secret key: `python -c "import secrets; print(secrets.token_hex(32))"`.

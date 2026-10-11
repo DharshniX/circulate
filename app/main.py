@@ -119,7 +119,8 @@ def db():
         id INTEGER PRIMARY KEY AUTOINCREMENT, role TEXT, seller_type TEXT, business_id TEXT, business_name TEXT, contact_name TEXT,
         email TEXT UNIQUE, phone TEXT, area TEXT, lane TEXT, password_hash TEXT, salt TEXT, token_version INTEGER DEFAULT 0,
         active INTEGER DEFAULT 1, created_at TEXT, last_login_at TEXT)""")
-    if str(DB) not in _SEEDED:
+    first = str(DB) not in _SEEDED
+    if first:
         _SEEDED.add(str(DB))
         _seed_users(con)
     con.execute("""CREATE TABLE IF NOT EXISTS requirements (
@@ -151,6 +152,8 @@ def db():
         con.execute("ALTER TABLE sync_log ADD COLUMN owner TEXT")
     _with_owner(con, "imported_stock", """CREATE TABLE IF NOT EXISTS imported_stock (owner TEXT, lane TEXT, item_id TEXT, item TEXT,
         rules TEXT, label TEXT, listed_at TEXT, source TEXT, PRIMARY KEY (owner, lane, item_id))""")
+    if first:
+        _seed_sample_network(con)
     return con
 
 
@@ -1490,6 +1493,12 @@ CITY_CENTRE = (0.0, 0.0)
 APPROX_NOTE = "approximate location"
 
 
+def _area_in(text: str | None) -> str:
+    """The listed area named in a text ("Anna Nagar Boys' Hostel Mess" -> "Anna Nagar"), or ""."""
+    flat = re.sub(r"[^a-z]", "", (text or "").lower())
+    return next((name for name in AREA_KM if re.sub(r"[^a-z]", "", name.lower()) in flat), "")
+
+
 def _area_xy(area: str | None) -> tuple[float, float]:
     """A business's area as approximate km coordinates; an area not in the list is the city centre."""
     flat = re.sub(r"[^a-z]", "", (area or "").lower())
@@ -2459,7 +2468,8 @@ ROLE_MENUS = {
               ("Deals", [("monitor", "Deal monitor", "gauge", None), ("deals", "Deals", "receipt", None), ("pickup", "Pickups and deliveries", "truck", None),
                          ("collections", "Collection requests", "package", None)]),
               ("Platform", [("quality", "Data quality", "shield-check", None), ("sim", "Simulation lab", "flask-conical", None),
-                            ("prices", "Price references", "banknote", None), ("rules", "Rules", "list-checks", None), ("users", "All users", "users", None)]),
+                            ("prices", "Price references", "banknote", None), ("rules", "Rules", "list-checks", None), ("users", "All users", "users", None),
+                            ("network", "Network", "map-pin", None)]),
               ("Alerts", [("ready", "Ready to send", "send", None), ("whatsapp", "WhatsApp alerts", "message-circle", None)])],
 }
 EVERY_ROLE_VIEWS = ["ready", "account"]  # the bell opens "Ready to send"; the business name opens Account
@@ -2488,9 +2498,11 @@ def _demo_accounts() -> dict:
     buyer("steel", "W")
     buyer("food", "M")
     buyer("food", "N")
+    out[KAVERI] = {"business_id": KAVERI, "role": "seller", "name": "Kaveri Constructions (site), Porur", "lane": "durable",
+                   "contact_role": "seller"}  # placed from its area, Porur; its sample stock is seeded with the network
     out["admin"] = {"business_id": "admin", "role": "admin", "name": "CIRCULATE Admin", "lane": "durable", "area": "CIRCULATE team"}
     for a in out.values():
-        a.setdefault("area", a["name"].split(", ", 1)[1] if ", " in a["name"] else "")
+        a.setdefault("area", a["name"].split(", ", 1)[1] if ", " in a["name"] else _area_in(a["name"]))
         a["short_name"] = a["name"].split(", ")[0]
         a["initial"] = a["short_name"][0].upper()
     return out
@@ -2530,6 +2542,7 @@ DEMO_USERS = [  # email, business id (from engine/scenarios.py), role, seller ty
     ("ezhil@demo.circulate", "steel:W", "buyer", None),
     ("anna@demo.circulate", "food:M", "buyer", None),
     ("thozhan@demo.circulate", "food:N", "buyer", None),
+    ("kaveri@demo.circulate", "site:kaveri", "seller", "construction_site"),
 ]
 _HASH_CACHE: dict[tuple[str, str], tuple[str, str]] = {}  # (email, password) -> (salt, hash): seeding a new database stays fast
 
@@ -2674,7 +2687,9 @@ def _session_out(sess: dict) -> dict:
     a = sess["view"] or sess["real"]
     lane_items = [i for g in _menu(a["role"]) for i in g["items"] if not i["lane"] or i["lane"] == a["lane"]]
     out = {**{k: v for k, v in a.items() if k != "user_id"}, "business_name": a["name"], "role_name": ROLE_NAMES[a["role"]],
-           "menu": _menu(a["role"]), "views": _views(a["role"]), "home": lane_items[0]["view"], "viewing_as": sess["view"] is not None,
+           "menu": _menu(a["role"]), "views": _views(a["role"]), "viewing_as": sess["view"] is not None,
+           # a construction site cuts no sheet: it starts on its stock
+           "home": "stock" if a.get("seller_type") == "construction_site" else lane_items[0]["view"],
            "owners": {v: {"role": _owner(v), "for": ROLE_FOR[_owner(v)]} for v in _views("admin")}, "auth_mode": auth_mode()}
     if sess["real"]["role"] == "admin":  # the "View as" menu
         out["real"] = {"business_id": sess["real"]["business_id"], "business_name": sess["real"]["name"], "role": "admin", "user_id": sess["user"]["id"]}
@@ -3244,6 +3259,84 @@ def collection_status(cid: int, s: CollectionStatusIn, request: Request, me=ADMI
         row = con.execute("SELECT * FROM collection_requests WHERE id=?", (cid,)).fetchone()
     _safely(_notify_collection, row, _origin(request))
     return _collection_out(row)
+
+
+# ---------------- The sample network: Kaveri's site stock and Ezhil's rebar order (Sample data) ----------------
+KAVERI = "site:kaveri"
+SAMPLE_SOURCE = "Sample stock seeded for the demo"
+
+
+def _kaveri_stock() -> list:
+    """About 60 TMT rebar offcuts (Fe500, 12 mm, 1.2 m to 2.5 m) and 10 sheets of 18 mm shuttering plywood, used once. Sample."""
+    from engine import materials as MAT
+    bars = [IMP.ImportedBar(id=f"KC-R{i + 1:02d}", seller_id="Kaveri Constructions", material="tmt_rebar", profile=MAT.rebar_profile(12),
+                            length_mm=1200 + round(1300 * i / 59 / 10) * 10, mass_per_m_kg=round(MAT.rebar_kg_per_m(12), 3), grade="Fe500",
+                            condition="good", days_unused=21, label="sample") for i in range(60)]
+    ply = [IMP.ImportedSheet(id=f"KC-P{i + 1:02d}", seller_id="Kaveri Constructions", material="shuttering_plywood", length_mm=2440,
+                             width_mm=1220, thickness_mm=18, grade="BWP", condition="used_once", is_full_sheet=True, days_unused=30,
+                             label="sample") for i in range(10)]
+    return bars + ply
+
+
+def _seed_sample_network(con) -> None:
+    """Once per database: Kaveri Constructions' sample stock and Ezhil's sample rebar requirement. Never repeated, never
+    overwritten (a closed requirement stays closed). CIRCULATE_SAMPLE_NETWORK=0 switches it off (the tests do)."""
+    if os.environ.get("CIRCULATE_SAMPLE_NETWORK", "1") == "0":
+        return
+    from engine import materials as MAT
+    con.execute("CREATE TABLE IF NOT EXISTS seeded (key TEXT PRIMARY KEY, at TEXT)")
+    done = {r[0] for r in con.execute("SELECT key FROM seeded")}
+    now = _now()
+    if "kaveri_stock" not in done:
+        for p in _kaveri_stock():
+            con.execute("INSERT OR IGNORE INTO imported_stock (owner, lane, item_id, item, rules, label, listed_at, source) VALUES (?,?,?,?,?,?,?,?)",
+                        (KAVERI, "durable", p.id, p.model_dump_json(), json.dumps(["Listed by the seller"]), "sample", now, SAMPLE_SOURCE))
+        con.execute("INSERT INTO seeded (key, at) VALUES ('kaveri_stock', ?)", (now,))
+    if "ezhil_rebar" not in done:
+        cx, cy = _centre("bars")
+        cur = con.execute("INSERT INTO requirements (created_at, lane, kind, scenario, demand, needed_by, standing, status, history, owner)"
+                          " VALUES (?,?,?,?,?,?,?,?,?,?)", (now, "durable", "linear", "bars", "{}", None, 0, "open",
+                                                             json.dumps([{"at": now, "status": "open", "note": "Sample requirement seeded for the demo"}]),
+                                                             "steel:W"))
+        d = LinearDemand(id=f"R{cur.lastrowid}", buyer_id="W", buyer_name="Ezhil Engineering Works, Ambattur", part_name="1.0 m bar",
+                         material="tmt_rebar", profile=MAT.rebar_profile(12), mass_per_m_kg=round(MAT.rebar_kg_per_m(12), 3), cut_length_mm=1000,
+                         accepted_grades=["Fe500"], quantity=40, new_price_per_kg=_sample_price("linear", "tmt_rebar"), x_km=cx, y_km=cy,
+                         label="sample")
+        con.execute("UPDATE requirements SET demand=? WHERE id=?", (d.model_dump_json(), cur.lastrowid))
+        con.execute("INSERT INTO seeded (key, at) VALUES ('ezhil_rebar', ?)", (now,))
+    con.commit()
+
+
+# ---------------- Network: who is on the platform, on a drawn map of Chennai (admin) ----------------
+@app.get("/api/network")
+def network(me=ADMIN):
+    """Every count comes from the database. Positions come from each business's area (approximate)."""
+    from collections import Counter
+    accounts = [u for u in _accounts_by_bid().values() if u["role"] != "admin" and u["active"]]
+    since = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat(timespec="seconds")
+    with closing(db()) as con:
+        cols = con.execute("SELECT * FROM collection_requests WHERE status != 'closed' ORDER BY id").fetchall()
+        week = con.execute("SELECT COUNT(*) FROM deals WHERE created_at >= ?", (since,)).fetchone()[0]
+        simulated = con.execute("SELECT COUNT(*) FROM deals WHERE is_simulated=1").fetchone()[0]
+        sample_stock = con.execute("SELECT COUNT(*) FROM imported_stock WHERE label != 'measured'").fetchone()[0]
+    by_type = Counter(u["seller_type"] or "not_given" for u in accounts if u["role"] == "seller")
+    area = lambda u: u["area"] or _area_in(u["business_name"])  # no area saved: the one in its name, if any
+    places = [{"business_id": u["business_id"], "name": u["business_name"], "role": u["role"], "seller_type": u["seller_type"],
+               "seller_type_name": SELLER_TYPES.get(u["seller_type"] or ""), "area": area(u),
+               "x_km": _area_xy(area(u))[0], "y_km": _area_xy(area(u))[1], "demo": u["business_id"] in _demo_accounts()} for u in accounts]
+    pickups = [{"id": c["id"], "business_name": c["business_name"], "area": c["area"], "x_km": _area_xy(c["area"])[0],
+                "y_km": _area_xy(c["area"])[1], "item_count": len(json.loads(c["items"])), "weight_kg": c["weight_kg"],
+                "status_text": COLLECTION_STATUS[c["status"]]} for c in cols]
+    demo = sum(p["demo"] for p in places)
+    return {"counts": {"sellers_by_type": {SELLER_TYPES.get(k, "Type not given"): n for k, n in sorted(by_type.items())},
+                       "sellers": sum(by_type.values()), "buyers": sum(1 for u in accounts if u["role"] == "buyer"),
+                       "open_collections": len(cols), "deals_this_week": week},
+            "places": places, "collections": pickups, "areas": {k: {"x_km": x, "y_km": y} for k, (x, y) in AREA_KM.items()},
+            "centre": {"x_km": CITY_CENTRE[0], "y_km": CITY_CENTRE[1]},
+            "sample": bool(demo or simulated or sample_stock),
+            "sample_why": f"{demo} demo businesses, {simulated} simulated deals and {sample_stock} sample stock items are in these counts.",
+            "note": "Positions come from each business's area, at rounded map coordinates (approximate); an area not on the list is "
+                    "placed at the city centre. Drawn without map tiles."}
 
 
 # ---------------- Add stock: direct links to the four pages ----------------

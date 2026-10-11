@@ -49,7 +49,8 @@ def temp_db(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("role, want", [
-    ("seller", {"Sri Ram Fabricators": "sriram@demo.circulate", "Thamarai Hotel Kitchen": "thamarai@demo.circulate"}),
+    ("seller", {"Sri Ram Fabricators": "sriram@demo.circulate", "Thamarai Hotel Kitchen": "thamarai@demo.circulate",
+                "Kaveri Constructions (site)": "kaveri@demo.circulate"}),
     ("buyer", {"Ezhil Engineering Works": "ezhil@demo.circulate", "Anna Nagar Boys' Hostel Mess": "anna@demo.circulate",
                "Thozhan Food Bank": "thozhan@demo.circulate"}),
 ])

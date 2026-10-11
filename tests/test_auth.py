@@ -131,7 +131,7 @@ def test_seeding_is_idempotent_and_never_overwrites_a_changed_password():
         before = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         main._seed_users(con)
         main._seed_users(con)
-        assert con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == before == 6  # the admin and five demo accounts
+        assert con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == before == 7  # the admin and six demo accounts
     main._SEEDED.discard(str(main.DB))  # as on a restart
     with closing(main.db()):
         pass
@@ -146,7 +146,7 @@ def test_no_admin_is_created_on_a_server_without_admin_password(monkeypatch, tmp
     monkeypatch.setattr(main, "DB", tmp_path / "server.db")
     with closing(main.db()) as con:
         assert con.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0] == 0
-        assert con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 5
+        assert con.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 6
     assert "No ADMIN_PASSWORD set" in caplog.text
 
 
@@ -166,7 +166,7 @@ def test_sign_up_creates_the_right_role_and_seller_type():
     s = TestClient(main.app)
     me = s.post("/api/auth/register", json=NEW).json()
     assert (me["role"], me["seller_type"], me["lane"], me["business_name"]) == ("seller", "construction_site", "durable", "Velan Builders, Porur")
-    assert me["business_id"].startswith("u") and me["home"] == "gapfill" and s.get("/api/session").status_code == 200
+    assert me["business_id"].startswith("u") and me["home"] == "stock" and s.get("/api/session").status_code == 200
     assert row("velan@example.com")["phone"] == "9876543210"
     b = TestClient(main.app).post("/api/auth/register", json={**NEW, "role": "buyer", "seller_type": "kitchen", "email": "mess@example.com",
                                                                "lane": "fresh", "business_name": "Mess"}).json()

@@ -537,6 +537,8 @@ body.entry{min-height:100vh;display:flex;background:var(--bg)}
 .login .err[hidden]{display:none}
 .login-alt{color:var(--mut);text-align:center}.login-alt a{font-weight:600}
 .demo-panel{border-top:1px solid var(--line);padding-top:var(--s2);display:flex;flex-direction:column;gap:var(--s1)}
+.netmap{width:100%;height:auto;display:block;border-radius:var(--r-card)}
+.netmap .halo{paint-order:stroke;stroke:var(--panel-2);stroke-width:4px;stroke-linejoin:round}
 .stype{margin-left:6px;font-size:11px;vertical-align:middle}
 .colpick{border:1px solid var(--line);border-radius:var(--r-card);padding:var(--s1) var(--s2) var(--s2);margin:0;display:flex;flex-direction:column;gap:var(--s1)}
 .colpick legend{font-weight:600;padding:0 4px}

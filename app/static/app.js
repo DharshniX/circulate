@@ -152,6 +152,7 @@ const TITLES = {
   gapfill: ["Sold before it's cut", "Sell the empty part of your next sheet to nearby buyers before you cut it."],
   offers: ["Offers and recovery plan", "Which buyers to try, in which order, before the deadline. Scrap or disposal is the last step."],
   stock: ["Stock and passports", "Every piece or lot, its scrap value, and a passport with a QR code."],
+  network: ["Network", "Who is on CIRCULATE, where, and what is moving. Every count comes from the database."],
   collections: ["Collection requests", "Sellers asking for a pickup. Pickup by a hired vehicle; CIRCULATE never buys or stores goods."],
   monitor: ["Deal monitor", "Every deal by stage. Simulated deals are never counted as verified."],
   quality: ["Data quality", "How much of what the app shows is measured, sample, simulated or verified."],
@@ -172,7 +173,7 @@ const st = {lane: "durable", role: "seller", view: "", scen: {durable: "steel", 
   job: {sheet_length_mm: 2500, sheet_width_mm: 1250, thickness_mm: 6, grade: "E250", part_name: "base plate", part_length_mm: 450, part_width_mm: 350, quantity: 9}};
 
 function navFor(role, lane) { return NAV[role].flatMap(([, items]) => items).filter(n => !n[3] || n[3] === lane); }
-const home = () => navFor(st.role, st.lane)[0][0];
+const home = () => { const items = navFor(st.role, st.lane); return SESSION && items.some(n => n[0] === SESSION.home) ? SESSION.home : items[0][0]; };
 // A seller or buyer (including the admin "viewing as" one) always works in their own business's lane; only the admin chooses.
 const laneLocked = () => !!SESSION && SESSION.role !== "admin";
 const allowed = view => view === "ready" || view === "account" || navFor(st.role, st.lane).some(n => n[0] === view);
@@ -1154,7 +1155,8 @@ function collectionsCard(C, n) {
       : `<div class="empty">${n ? "No collection requests yet. Press Request collection to ask for a pickup." : "Add stock first; then you can request a collection."}</div>`}</div>`;
 }
 function openCollect(own, C) {
-  const today = new Date().toISOString().slice(0, 10), tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+  const day = ms => new Date(ms).toLocaleDateString("en-CA");  // YYYY-MM-DD in the viewer's own time zone
+  const today = day(Date.now()), tomorrow = day(Date.now() + 864e5);
   const d = drawer.open("Request collection", `<form id="colForm" class="form" novalidate>
     <p class="note">${esc(C.pickup)}</p>
     <fieldset class="colpick"><legend>Items to collect</legend>
@@ -1208,6 +1210,51 @@ async function vCollections(el) {
     try { const t = await api(`/api/collections/${b.dataset.col}/status`, {status: b.dataset.to}); toast(`C${t.id}: ${esc(t.status_text)}.`); render(); }
     catch (e) { toast(esc(e.message), "bad"); }
   });
+}
+
+/* ---------------- Admin: the network on a drawn map of Chennai (no map tiles; positions from each business's area) ---------------- */
+const ST_COL = {workshop: "var(--np)", construction_site: "var(--warn)", shop: "var(--mut)", kitchen: "var(--pe)"};
+function networkSvg(N) {
+  const pts = [N.centre, ...Object.values(N.areas), ...N.places, ...N.collections];
+  const pad = 2.2, x0 = Math.min(...pts.map(p => p.x_km)) - pad, x1 = Math.max(...pts.map(p => p.x_km)) + pad;
+  const y0 = Math.min(...pts.map(p => p.y_km)) - pad, y1 = Math.max(...pts.map(p => p.y_km)) + pad;
+  const W = 760, sc = W / (x1 - x0), H = Math.round((y1 - y0) * sc);
+  const X = x => (x - x0) * sc, Y = y => H - (y - y0) * sc;
+  let g = `<rect x="0" y="0" width="${W}" height="${H}" rx="8" style="fill:var(--panel-2)"/>`;
+  for (let k = Math.ceil(x0 / 5) * 5; k <= x1; k += 5) g += `<line x1="${X(k)}" y1="0" x2="${X(k)}" y2="${H}" style="stroke:var(--line);stroke-width:1"/>`;
+  for (let k = Math.ceil(y0 / 5) * 5; k <= y1; k += 5) g += `<line x1="0" y1="${Y(k)}" x2="${W}" y2="${Y(k)}" style="stroke:var(--line);stroke-width:1"/>`;
+  g += `<g transform="translate(${X(N.centre.x_km)},${Y(N.centre.y_km)})"><path d="M-7 0H7M0 -7V7" style="stroke:var(--mut);stroke-width:2"/><text x="10" y="-8" style="font:500 12px var(--body);fill:var(--mut)">City centre</text></g>`;
+  for (const [name, a] of Object.entries(N.areas)) g += `<circle cx="${X(a.x_km)}" cy="${Y(a.y_km)}" r="3" style="fill:var(--mut)"/><text x="${X(a.x_km) + 7}" y="${Y(a.y_km) + 16}" class="halo" style="font:500 12px var(--body);fill:var(--mut)">${esc(name)}</text>`;
+  const at = {};  // markers at the same place are spread on a small ring, so none hides another
+  const marks = [...N.places.map(p => ({...p, kind: p.role})), ...N.collections.map(c => ({...c, kind: "collection", name: c.business_name}))];
+  for (const m of marks) { const k = `${m.x_km},${m.y_km}`; (at[k] = at[k] || []).push(m); }
+  for (const group of Object.values(at)) group.forEach((m, i) => {
+    const r = group.length > 1 ? 15 : 0, a = 2 * Math.PI * i / group.length - Math.PI / 2;
+    const cx = X(m.x_km) + r * Math.cos(a), cy = Y(m.y_km) + r * Math.sin(a);
+    const title = m.kind === "collection" ? `Collection request C${m.id}: ${m.business_name}, ${m.item_count} items, ${num(m.weight_kg, 1)} kg (${m.status_text})`
+      : `${m.name} · ${m.role === "seller" ? (m.seller_type_name || "Seller") : "Buyer"} · ${m.area || "area not given"}`;
+    g += m.kind === "seller" ? `<circle cx="${cx}" cy="${cy}" r="8" style="fill:${ST_COL[m.seller_type] || "var(--fg)"};stroke:var(--panel);stroke-width:2"><title>${esc(title)}</title></circle>`
+      : m.kind === "buyer" ? `<rect x="${cx - 7}" y="${cy - 7}" width="14" height="14" rx="2" style="fill:var(--panel);stroke:var(--fg);stroke-width:2.5"><title>${esc(title)}</title></rect>`
+      : `<path d="M${cx} ${cy - 10}L${cx + 9} ${cy + 6}H${cx - 9}Z" style="fill:var(--acc);stroke:var(--panel);stroke-width:1.5"><title>${esc(title)}</title></path>`;
+  });
+  const c = N.counts;
+  return `<svg class="netmap" viewBox="0 0 ${W} ${H}" role="img" aria-label="Map of Chennai areas: ${c.sellers} sellers, ${c.buyers} buyers and ${c.open_collections} open collection requests, placed by area">${g}</svg>`;
+}
+async function vNetwork(el) {
+  const N = await api("/api/network"), c = N.counts;
+  const tiles = `<div class="tiles">${Object.entries(c.sellers_by_type).map(([t, n]) => `<div class="tile"><b>${n}</b><span>Sellers: ${esc(t)}</span></div>`).join("")}
+    <div class="tile"><b>${c.buyers}</b><span>Buyers</span></div><div class="tile hi"><b>${c.open_collections}</b><span>Open collection requests</span></div>
+    <div class="tile"><b>${c.deals_this_week}</b><span>Deals this week</span></div></div>`;
+  if (!N.places.length) { el.innerHTML = tiles + emptyState("map-pin", "No sellers or buyers yet. Businesses appear here as soon as they sign up."); return; }
+  const types = [...new Set(N.places.filter(p => p.role === "seller").map(p => p.seller_type))];
+  el.innerHTML = `<div class="ctrl">${N.sample ? `<span title="${esc(N.sample_why)}">${badge("sample", "Sample data")}</span>` : ""}<span class="note">${esc(N.sample ? N.sample_why : "")}</span></div>
+    ${tiles}
+    <div class="card"><h2>Chennai</h2>${networkSvg(N)}
+      <div class="leg">${types.map(t => `<span><i style="background:${ST_COL[t] || "var(--fg)"};border-radius:99px"></i>Seller: ${esc((N.places.find(p => p.seller_type === t) || {}).seller_type_name || "type not given")}</span>`).join("")}
+        <span><i style="background:var(--panel);box-shadow:inset 0 0 0 2px var(--fg)"></i>Buyer</span><span><i style="background:var(--acc);clip-path:polygon(50% 0,100% 100%,0 100%)"></i>Open collection request</span></div>
+      <p class="note">${esc(N.note)}</p></div>
+    <div class="card"><h2>Who is on the map</h2><div class="scroll"><table><tr><th>Business</th><th>Role</th><th>Area</th></tr>${N.places.map(p => `<tr><td><b>${esc(short(p.name))}</b>${p.demo ? ` ${badge("sample", "Demo")}` : ""}</td>
+      <td>${p.role === "seller" ? `Seller${typeChip(p)}` : "Buyer"}</td><td>${esc(p.area || "–")} <span class="note">(approximate location)</span></td></tr>`).join("")}</table></div></div>`;
 }
 
 /* ---------------- Buyer and seller: pickup and delivery (simulated transport) ---------------- */
@@ -1521,7 +1568,7 @@ async function vUsers(el) {
 }
 
 /* ---------------- render ---------------- */
-const VIEWS = {collections: vCollections, users: vUsers, account: vAccount, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, add: vAdd, "add-csv": vAddCsv, "add-sync": vAddSync, "add-manual": vAddManual, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
+const VIEWS = {network: vNetwork, collections: vCollections, users: vUsers, account: vAccount, whatsapp: vWhatsapp, ready: vReady, post: vPost, reqs: vReqs, add: vAdd, "add-csv": vAddCsv, "add-sync": vAddSync, "add-manual": vAddManual, browse: vBrowse, pickup: vPickup, match: vMatch, deals: el => vDeals(el, false), gapfill: vGap, offers: vOffers, stock: vStock, monitor: el => vDeals(el, true), quality: vQuality, prices: vPrices, rules: vRules, sim: vSim};
 let ticket = 0;
 async function render() {
   shell();

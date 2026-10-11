@@ -90,7 +90,7 @@ def test_each_role_menu_has_only_its_screens():
     assert menu_views(b) == BUYER and b["menu"][0]["items"][0]["view"] == "browse"
     a = client("admin", "admin").get("/api/session").json()
     assert menu_views(a) >= SELLER | BUYER | {"quality", "sim", "users", "monitor", "offers"}
-    assert "accounts" not in s and "accounts" not in b and len(a["accounts"]) == 6
+    assert "accounts" not in s and "accounts" not in b and len(a["accounts"]) == 7
     assert s["owners"]["browse"]["for"] == "buyers" and b["owners"]["gapfill"]["for"] == "sellers"
     assert s["owners"]["quality"]["for"] == "the CIRCULATE team"
 
