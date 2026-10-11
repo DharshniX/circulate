@@ -49,7 +49,60 @@ Open the app at `http://192.168.1.23:8000` (your address, not 127.0.0.1), then g
 Seller > Stock and passports > Print QR labels. The QR codes now point at the laptop's address.
 Windows may ask to allow Python through the firewall: allow it on private networks.
 
-Run the tests (50 of them) in a second window:
+## Sign in
+
+Every screen needs an account. Open http://127.0.0.1:8000, choose **I sell surplus**, **I buy materials**
+or **Admin**, and sign in with an email and password.
+
+**Demo accounts (DEMO ONLY: these passwords are public, never use them for real data).**
+Password for all five: `Circulate@2026` (or whatever `DEMO_PASSWORD` is set to).
+
+| Email | Business | Role |
+| --- | --- | --- |
+| `sriram@demo.circulate` | Sri Ram Fabricators, Ambattur | Seller (workshop, Durable) |
+| `thamarai@demo.circulate` | Thamarai Hotel Kitchen, Egmore | Seller (kitchen, Fresh) |
+| `ezhil@demo.circulate` | Ezhil Engineering Works, Ambattur | Buyer (Durable) |
+| `anna@demo.circulate` | Anna Nagar Boys' Hostel Mess | Buyer (Fresh) |
+| `thozhan@demo.circulate` | Thozhan Food Bank, Saidapet | Buyer (Fresh, food bank) |
+
+On the seller and buyer sign-in pages, tapping a demo business only fills in its email and password;
+you still press Sign in.
+
+**Admin.** The admin email is `ADMIN_EMAIL` (default `admin@circulate.local`) and the password is
+`ADMIN_PASSWORD`. Locally, if `ADMIN_PASSWORD` is not set, the first start creates the admin with a
+random password and prints it once in the console. On a server with no `ADMIN_PASSWORD`, no admin is
+created and a warning is logged. Seeding runs at every start and never overwrites a password that was changed.
+
+**New businesses** sign up at `/signup/seller` or `/signup/buyer` and start with empty screens. Their
+position on the map comes from their area (Ambattur, Anna Nagar, Egmore, Saidapet, Guindy, Porur,
+T Nagar, Velachery, Perungudi or Tambaram; any other area is the city centre), so their distances and
+pickup costs are marked "approximate location". There is no email sending: a forgotten password is
+reset by the admin under All users, who gives the account holder a temporary password.
+
+**Who sees what.** Sellers see only their own stock, imports, deals and pickups; buyers see only their
+own requirements and orders; the admin sees everything, and "View as" shows exactly what one business
+sees. Browse surplus stays open: every buyer sees every seller's stock, and Gap Fill and matching use
+every buyer's open requirements. A deal is visible to its buyer, its sellers and the admin only.
+Passports, QR codes, labels, Share on WhatsApp and the phone registration page (`/register`) stay public.
+
+### Settings (environment variables)
+
+| Variable | What it does |
+| --- | --- |
+| `SECRET_KEY` | Signs the session cookie. Set a long random value on a server. If missing, a random key is kept in `.secret_key` (git-ignored). Changing it signs everyone out. |
+| `ADMIN_EMAIL` | The admin's email. Default `admin@circulate.local`. |
+| `ADMIN_PASSWORD` | The admin's password, used only when the admin account is first created. |
+| `DEMO_PASSWORD` | Password for the five demo accounts when they are first created. Default `Circulate@2026`. |
+| `AUTH_MODE` | `real` (default): email and password. `demo`: the old one-tap demo login, for emergencies only. |
+
+To make a secret key: `python -c "import secrets; print(secrets.token_hex(32))"`.
+
+**Emergency switch.** If sign-in fails during a live demo, set `AUTH_MODE=demo` and restart: the
+sign-in pages go back to one tap per demo business and a "Demo login mode" bar shows on every screen.
+Set it back to `real` (or remove it) straight after. Sessions last 7 days; five wrong passwords for
+one email lock that email for 5 minutes.
+
+Run the tests in a second window:
 
 ```
 cd <the same folder>
@@ -76,10 +129,11 @@ On Mac or Linux, use `source .venv/bin/activate` instead.
 | `engine/impact.py` | Impact ledger with a counterfactual per material; no CO2 without a cited factor |
 | `engine/gapfill.py` | Sold before it's cut: fills the empty space in a cutting plan with neighbours' standing orders, checked by `verify_placements` |
 | `engine/scenarios.py` | Sample data for the four demo tabs and the Gap Fill demo |
-| `app/main.py` | FastAPI endpoints and the deal life cycle (SQLite) |
+| `app/main.py` | FastAPI endpoints, accounts and ownership, and the deal life cycle (SQLite) |
+| `app/auth.py` | Password hashing (scrypt), signed session cookies and the sign-in throttle |
 | `app/static/app.html`, `app.css`, `app.js` | The app: lanes, roles and every screen |
 | `app/static/index.html` | The old demo page, served at `/legacy` |
-| `tests/` | 50 tests |
+| `tests/` | The tests; `test_auth.py` and `test_ownership.py` cover sign-in and who sees what |
 
 ## Adding a new engine
 
@@ -121,5 +175,6 @@ python research/summarise.py research/results.json
 - Parts are rectangles (bounding boxes); irregular shapes under-count yield.
 - One part type or cut length per order.
 - Close probabilities are assumptions until there are real outcomes.
-- Straight-line distances on a local grid, not road distances.
+- Straight-line distances on a local grid, not road distances. New businesses are placed from their area: approximate.
+- Accounts live in the SQLite file; on a server without a persistent disk they are reset at every restart (the demo accounts come back).
 - Food-safety rules are platform rules for a prototype, not legal advice.

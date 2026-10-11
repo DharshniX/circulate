@@ -150,7 +150,7 @@ def test_two_sellers_cannot_see_each_others_stock_imports_deals_or_pickups(tmp_p
     # a photo can be changed only by the seller who listed the item
     png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
     assert site.post("/api/photo/steel/A1", content=png, headers={"Content-Type": "image/png"}).status_code == 403
-    assert site.post(f"/api/photo/import_durable@steel:A/SR1", content=png, headers={"Content-Type": "image/png"}).status_code == 403
+    assert site.post("/api/photo/import_durable@steel:A/SR1", content=png, headers={"Content-Type": "image/png"}).status_code == 403
 
 
 # ---------------- 13. the marketplace stays open ----------------
